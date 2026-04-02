@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import { toolDefinitions, executeTool, isDangerous, needsConfirmation } from "./tools.js";
+import chalk from "chalk";
+import { toolDefinitions, executeTool, checkPermission, type ToolDef, type PermissionMode } from "./tools.js";
 import {
   printAssistantText,
   printToolCall,
@@ -11,9 +12,14 @@ import {
   printCost,
   printRetry,
   printInfo,
+  printSubAgentStart,
+  printSubAgentEnd,
+  startSpinner,
+  stopSpinner,
 } from "./ui.js";
 import { saveSession } from "./session.js";
 import { buildSystemPrompt } from "./prompt.js";
+import { getSubAgentConfig, type SubAgentType } from "./subagent.js";
 import * as readline from "readline";
 import { randomUUID } from "crypto";
 
@@ -62,10 +68,35 @@ function getContextWindow(model: string): number {
   return MODEL_CONTEXT[model] || 200000;
 }
 
+// ─── Thinking support detection ─────────────────────────────
+// Mirrors Claude Code: adaptive for 4.6, enabled for older Claude 4, disabled for the rest.
+
+function modelSupportsThinking(model: string): boolean {
+  const m = model.toLowerCase();
+  // Claude 4+ models support thinking (not Claude 3.x)
+  if (m.includes("claude-3-") || m.includes("3-5-") || m.includes("3-7-")) return false;
+  if (m.includes("claude") && (m.includes("opus") || m.includes("sonnet") || m.includes("haiku"))) return true;
+  return false; // non-Claude models (GPT, etc.) — no thinking
+}
+
+function modelSupportsAdaptiveThinking(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.includes("opus-4-6") || m.includes("sonnet-4-6");
+}
+
+// Max output tokens by model (mirrors Claude Code's context.ts)
+function getMaxOutputTokens(model: string): number {
+  const m = model.toLowerCase();
+  if (m.includes("opus-4-6")) return 64000;
+  if (m.includes("sonnet-4-6")) return 32000;
+  if (m.includes("opus-4") || m.includes("sonnet-4") || m.includes("haiku-4")) return 32000;
+  return 16384; // safe default for unknown models
+}
+
 // ─── Convert tools to OpenAI format ─────────────────────────
 
-function toOpenAITools(): OpenAI.ChatCompletionTool[] {
-  return toolDefinitions.map((t) => ({
+function toOpenAITools(tools: ToolDef[]): OpenAI.ChatCompletionTool[] {
+  return tools.map((t) => ({
     type: "function" as const,
     function: {
       name: t.name,
@@ -75,31 +106,59 @@ function toOpenAITools(): OpenAI.ChatCompletionTool[] {
   }));
 }
 
+// ─── Multi-tier compression constants ────────────────────────
+// Mirrors Claude Code's 4-layer compression: budget → snip → microcompact → auto-compact
+
+const SNIPPABLE_TOOLS = new Set(["read_file", "grep_search", "list_files", "run_shell"]);
+const SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]";
+const SNIP_THRESHOLD = 0.60;
+const MICROCOMPACT_IDLE_MS = 5 * 60 * 1000; // 5 minutes
+const KEEP_RECENT_RESULTS = 3;
+
 // ─── Agent ───────────────────────────────────────────────────
 
 interface AgentOptions {
-  yolo?: boolean;
+  permissionMode?: PermissionMode;
+  yolo?: boolean;             // Legacy alias for bypassPermissions
   model?: string;
-  apiBase?: string;          // OpenAI-compatible base URL
-  anthropicBaseURL?: string; // Anthropic base URL (e.g. proxy)
+  apiBase?: string;           // OpenAI-compatible base URL
+  anthropicBaseURL?: string;  // Anthropic base URL (e.g. proxy)
   apiKey?: string;
   thinking?: boolean;
+  maxCostUsd?: number;        // Budget: max USD spend
+  maxTurns?: number;          // Budget: max agentic turns
+  confirmFn?: (message: string) => Promise<boolean>; // External confirmation callback
+  // Sub-agent options
+  customSystemPrompt?: string;
+  customTools?: ToolDef[];
+  isSubAgent?: boolean;
 }
 
 export class Agent {
   private anthropicClient?: Anthropic;
   private openaiClient?: OpenAI;
   private useOpenAI: boolean;
-  private yolo: boolean;
+  private permissionMode: PermissionMode;
   private thinking: boolean;
+  private thinkingMode: "adaptive" | "enabled" | "disabled";
   private model: string;
   private systemPrompt: string;
+  private tools: ToolDef[];
   private totalInputTokens = 0;
   private totalOutputTokens = 0;
   private lastInputTokenCount = 0;
   private effectiveWindow: number;
   private sessionId: string;
   private sessionStartTime: string;
+  private isSubAgent: boolean;
+
+  // Budget control
+  private maxCostUsd?: number;
+  private maxTurns?: number;
+  private currentTurns = 0;
+
+  // Multi-tier compression state
+  private lastApiCallTime = 0;
 
   // Abort support
   private abortController: AbortController | null = null;
@@ -107,19 +166,39 @@ export class Agent {
   // Permission whitelist: paths confirmed in this session
   private confirmedPaths: Set<string> = new Set();
 
+  // External confirmation callback (avoids creating a second readline on stdin)
+  private confirmFn?: (message: string) => Promise<boolean>;
+
+  // Sub-agent output buffer (captures text instead of printing)
+  private outputBuffer: string[] | null = null;
+
   // Separate message histories for each backend
   private anthropicMessages: Anthropic.MessageParam[] = [];
   private openaiMessages: OpenAI.ChatCompletionMessageParam[] = [];
 
   constructor(options: AgentOptions = {}) {
-    this.yolo = options.yolo || false;
+    // Permission mode: explicit mode > yolo legacy > default
+    this.permissionMode = options.permissionMode
+      || (options.yolo ? "bypassPermissions" : "default");
     this.thinking = options.thinking || false;
     this.model = options.model || "claude-opus-4-6";
+    this.thinkingMode = this.resolveThinkingMode();
     this.useOpenAI = !!options.apiBase;
-    this.systemPrompt = buildSystemPrompt();
+    this.isSubAgent = options.isSubAgent || false;
+    this.tools = options.customTools || toolDefinitions;
+    this.maxCostUsd = options.maxCostUsd;
+    this.maxTurns = options.maxTurns;
+    this.confirmFn = options.confirmFn;
     this.effectiveWindow = getContextWindow(this.model) - 20000;
     this.sessionId = randomUUID().slice(0, 8);
     this.sessionStartTime = new Date().toISOString();
+
+    // Build system prompt (with plan mode injection if needed)
+    let sysPrompt = options.customSystemPrompt || buildSystemPrompt();
+    if (this.permissionMode === "plan") {
+      sysPrompt += "\n\n# Plan Mode Active\nYou are in PLAN mode. Describe what changes you would make, but do NOT execute any write operations (write_file, edit_file, or destructive shell commands). Only use read-only tools to analyze the codebase.";
+    }
+    this.systemPrompt = sysPrompt;
 
     if (this.useOpenAI) {
       this.openaiClient = new OpenAI({
@@ -135,12 +214,23 @@ export class Agent {
     }
   }
 
+  private resolveThinkingMode(): "adaptive" | "enabled" | "disabled" {
+    if (!this.thinking) return "disabled";
+    if (!modelSupportsThinking(this.model)) return "disabled";
+    if (modelSupportsAdaptiveThinking(this.model)) return "adaptive";
+    return "enabled";
+  }
+
   abort() {
     this.abortController?.abort();
   }
 
   get isProcessing(): boolean {
     return this.abortController !== null;
+  }
+
+  setConfirmFn(fn: (message: string) => Promise<boolean>) {
+    this.confirmFn = fn;
   }
 
   getTokenUsage() {
@@ -158,8 +248,38 @@ export class Agent {
     } finally {
       this.abortController = null;
     }
-    printDivider();
-    this.autoSave();
+    if (!this.isSubAgent) {
+      printDivider();
+      this.autoSave();
+    }
+  }
+
+  // ─── Sub-agent entry point ────────────────────────────────
+
+  async runOnce(prompt: string): Promise<{ text: string; tokens: { input: number; output: number } }> {
+    this.outputBuffer = [];
+    const prevInput = this.totalInputTokens;
+    const prevOutput = this.totalOutputTokens;
+    await this.chat(prompt);
+    const text = this.outputBuffer.join("");
+    this.outputBuffer = null;
+    return {
+      text,
+      tokens: {
+        input: this.totalInputTokens - prevInput,
+        output: this.totalOutputTokens - prevOutput,
+      },
+    };
+  }
+
+  // ─── Output helper (captures if sub-agent) ────────────────
+
+  private emitText(text: string): void {
+    if (this.outputBuffer) {
+      this.outputBuffer.push(text);
+    } else {
+      printAssistantText(text);
+    }
   }
 
   // ─── REPL commands ──────────────────────────────────────────
@@ -177,12 +297,30 @@ export class Agent {
   }
 
   showCost() {
+    const total = this.getCurrentCostUsd();
+    const budgetInfo = this.maxCostUsd ? ` / $${this.maxCostUsd} budget` : "";
+    const turnInfo = this.maxTurns ? ` | Turns: ${this.currentTurns}/${this.maxTurns}` : "";
+    printInfo(
+      `Tokens: ${this.totalInputTokens} in / ${this.totalOutputTokens} out\n  Estimated cost: $${total.toFixed(4)}${budgetInfo}${turnInfo}`
+    );
+  }
+
+  // ─── Budget control ────────────────────────────────────────
+
+  private getCurrentCostUsd(): number {
     const costIn = (this.totalInputTokens / 1_000_000) * 3;
     const costOut = (this.totalOutputTokens / 1_000_000) * 15;
-    const total = costIn + costOut;
-    printInfo(
-      `Tokens: ${this.totalInputTokens} in / ${this.totalOutputTokens} out\n  Estimated cost: $${total.toFixed(4)}`
-    );
+    return costIn + costOut;
+  }
+
+  private checkBudget(): { exceeded: boolean; reason?: string } {
+    if (this.maxCostUsd !== undefined && this.getCurrentCostUsd() >= this.maxCostUsd) {
+      return { exceeded: true, reason: `Cost limit reached ($${this.getCurrentCostUsd().toFixed(4)} >= $${this.maxCostUsd})` };
+    }
+    if (this.maxTurns !== undefined && this.currentTurns >= this.maxTurns) {
+      return { exceeded: true, reason: `Turn limit reached (${this.currentTurns} >= ${this.maxTurns})` };
+    }
+    return { exceeded: false };
   }
 
   async compact() {
@@ -289,6 +427,277 @@ export class Agent {
     this.lastInputTokenCount = 0;
   }
 
+  // ─── Multi-tier compression pipeline ──────────────────────
+  // Mirrors Claude Code's 4-layer: budget → snip → microcompact → auto-compact
+  // Tiers 1-3 are zero-API-cost, operating on the local message array.
+
+  private runCompressionPipeline(): void {
+    if (this.useOpenAI) {
+      this.budgetToolResultsOpenAI();
+      this.snipStaleResultsOpenAI();
+      this.microcompactOpenAI();
+    } else {
+      this.budgetToolResultsAnthropic();
+      this.snipStaleResultsAnthropic();
+      this.microcompactAnthropic();
+    }
+  }
+
+  // Tier 1: Budget tool results — dynamically shrink large results as context fills
+  private budgetToolResultsAnthropic(): void {
+    const utilization = this.lastInputTokenCount / this.effectiveWindow;
+    if (utilization < 0.5) return;
+    const budget = utilization > 0.7 ? 15000 : 30000;
+
+    for (const msg of this.anthropicMessages) {
+      if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+      for (let i = 0; i < msg.content.length; i++) {
+        const block = msg.content[i] as any;
+        if (block.type === "tool_result" && typeof block.content === "string" && block.content.length > budget) {
+          const keepEach = Math.floor((budget - 80) / 2);
+          block.content = block.content.slice(0, keepEach) +
+            `\n\n[... budgeted: ${block.content.length - keepEach * 2} chars truncated ...]\n\n` +
+            block.content.slice(-keepEach);
+        }
+      }
+    }
+  }
+
+  private budgetToolResultsOpenAI(): void {
+    const utilization = this.lastInputTokenCount / this.effectiveWindow;
+    if (utilization < 0.5) return;
+    const budget = utilization > 0.7 ? 15000 : 30000;
+
+    for (const msg of this.openaiMessages) {
+      if ((msg as any).role === "tool" && typeof (msg as any).content === "string") {
+        const content = (msg as any).content as string;
+        if (content.length > budget) {
+          const keepEach = Math.floor((budget - 80) / 2);
+          (msg as any).content = content.slice(0, keepEach) +
+            `\n\n[... budgeted: ${content.length - keepEach * 2} chars truncated ...]\n\n` +
+            content.slice(-keepEach);
+        }
+      }
+    }
+  }
+
+  // Tier 2: Snip stale results — replace old/duplicate tool results with placeholder
+  private snipStaleResultsAnthropic(): void {
+    const utilization = this.lastInputTokenCount / this.effectiveWindow;
+    if (utilization < SNIP_THRESHOLD) return;
+
+    // Collect all tool_result blocks with metadata
+    const results: { msgIdx: number; blockIdx: number; toolName: string; filePath?: string }[] = [];
+    for (let mi = 0; mi < this.anthropicMessages.length; mi++) {
+      const msg = this.anthropicMessages[mi];
+      if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+      for (let bi = 0; bi < msg.content.length; bi++) {
+        const block = msg.content[bi] as any;
+        if (block.type === "tool_result" && typeof block.content === "string" && block.content !== SNIP_PLACEHOLDER) {
+          // Find the corresponding tool_use to get tool name and input
+          const toolUseId = block.tool_use_id;
+          const toolInfo = this.findToolUseById(toolUseId);
+          if (toolInfo && SNIPPABLE_TOOLS.has(toolInfo.name)) {
+            results.push({ msgIdx: mi, blockIdx: bi, toolName: toolInfo.name, filePath: toolInfo.input?.file_path });
+          }
+        }
+      }
+    }
+
+    if (results.length <= KEEP_RECENT_RESULTS) return;
+
+    // Strategy: snip duplicates and old results, keep recent N
+    const toSnip = new Set<number>();
+    const seenFiles = new Map<string, number[]>(); // filePath → indices
+
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.toolName === "read_file" && r.filePath) {
+        const existing = seenFiles.get(r.filePath) || [];
+        existing.push(i);
+        seenFiles.set(r.filePath, existing);
+      }
+    }
+
+    // Snip earlier reads of same file
+    for (const indices of seenFiles.values()) {
+      if (indices.length > 1) {
+        for (let j = 0; j < indices.length - 1; j++) toSnip.add(indices[j]);
+      }
+    }
+
+    // Snip oldest results beyond keep-recent threshold
+    const snipBefore = results.length - KEEP_RECENT_RESULTS;
+    for (let i = 0; i < snipBefore; i++) toSnip.add(i);
+
+    for (const idx of toSnip) {
+      const r = results[idx];
+      const block = (this.anthropicMessages[r.msgIdx].content as any[])[r.blockIdx];
+      block.content = SNIP_PLACEHOLDER;
+    }
+  }
+
+  private snipStaleResultsOpenAI(): void {
+    const utilization = this.lastInputTokenCount / this.effectiveWindow;
+    if (utilization < SNIP_THRESHOLD) return;
+
+    // Collect tool messages
+    const toolMsgs: { idx: number; toolCallId: string }[] = [];
+    for (let i = 0; i < this.openaiMessages.length; i++) {
+      const msg = this.openaiMessages[i] as any;
+      if (msg.role === "tool" && typeof msg.content === "string" && msg.content !== SNIP_PLACEHOLDER) {
+        toolMsgs.push({ idx: i, toolCallId: msg.tool_call_id });
+      }
+    }
+
+    if (toolMsgs.length <= KEEP_RECENT_RESULTS) return;
+
+    // Snip all but the most recent N
+    const snipCount = toolMsgs.length - KEEP_RECENT_RESULTS;
+    for (let i = 0; i < snipCount; i++) {
+      (this.openaiMessages[toolMsgs[i].idx] as any).content = SNIP_PLACEHOLDER;
+    }
+  }
+
+  // Tier 3: Microcompact — aggressively clear old results when prompt cache is cold
+  private microcompactAnthropic(): void {
+    if (!this.lastApiCallTime || (Date.now() - this.lastApiCallTime) < MICROCOMPACT_IDLE_MS) return;
+
+    // Collect ALL tool_results across messages, clear all but recent N
+    const allResults: { msgIdx: number; blockIdx: number }[] = [];
+    for (let mi = 0; mi < this.anthropicMessages.length; mi++) {
+      const msg = this.anthropicMessages[mi];
+      if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+      for (let bi = 0; bi < msg.content.length; bi++) {
+        const block = msg.content[bi] as any;
+        if (block.type === "tool_result" && typeof block.content === "string" &&
+            block.content !== SNIP_PLACEHOLDER && block.content !== "[Old result cleared]") {
+          allResults.push({ msgIdx: mi, blockIdx: bi });
+        }
+      }
+    }
+
+    const clearCount = allResults.length - KEEP_RECENT_RESULTS;
+    for (let i = 0; i < clearCount && i < allResults.length; i++) {
+      const r = allResults[i];
+      (this.anthropicMessages[r.msgIdx].content as any[])[r.blockIdx].content = "[Old result cleared]";
+    }
+  }
+
+  private microcompactOpenAI(): void {
+    if (!this.lastApiCallTime || (Date.now() - this.lastApiCallTime) < MICROCOMPACT_IDLE_MS) return;
+
+    const toolMsgs: number[] = [];
+    for (let i = 0; i < this.openaiMessages.length; i++) {
+      const msg = this.openaiMessages[i] as any;
+      if (msg.role === "tool" && typeof msg.content === "string" &&
+          msg.content !== SNIP_PLACEHOLDER && msg.content !== "[Old result cleared]") {
+        toolMsgs.push(i);
+      }
+    }
+
+    const clearCount = toolMsgs.length - KEEP_RECENT_RESULTS;
+    for (let i = 0; i < clearCount && i < toolMsgs.length; i++) {
+      (this.openaiMessages[toolMsgs[i]] as any).content = "[Old result cleared]";
+    }
+  }
+
+  // Helper: find a tool_use block by its ID in assistant messages
+  private findToolUseById(toolUseId: string): { name: string; input: any } | null {
+    for (const msg of this.anthropicMessages) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      for (const block of msg.content as any[]) {
+        if (block.type === "tool_use" && block.id === toolUseId) {
+          return { name: block.name, input: block.input };
+        }
+      }
+    }
+    return null;
+  }
+
+  // ─── Execute tool (handles agent tool internally) ─────────
+
+  private async executeToolCall(
+    name: string,
+    input: Record<string, any>
+  ): Promise<string> {
+    if (name === "agent") return this.executeAgentTool(input);
+    if (name === "skill") return this.executeSkillTool(input);
+    return executeTool(name, input);
+  }
+
+  // ─── Skill fork mode ─────────────────────────────────────
+
+  private async executeSkillTool(input: Record<string, any>): Promise<string> {
+    const { executeSkill } = await import("./skills.js");
+    const result = executeSkill(input.skill_name, input.args || "");
+    if (!result) return `Unknown skill: ${input.skill_name}`;
+
+    if (result.context === "fork") {
+      // Fork mode: run in isolated sub-agent
+      const tools = result.allowedTools
+        ? this.tools.filter(t => result.allowedTools!.includes(t.name))
+        : this.tools.filter(t => t.name !== "agent");
+
+      printSubAgentStart("skill-fork", input.skill_name);
+      const subAgent = new Agent({
+        model: this.model,
+        apiBase: this.useOpenAI ? this.openaiClient?.baseURL : undefined,
+        customSystemPrompt: result.prompt,
+        customTools: tools,
+        isSubAgent: true,
+        permissionMode: "bypassPermissions",
+      });
+
+      try {
+        const subResult = await subAgent.runOnce(input.args || "Execute this skill task.");
+        this.totalInputTokens += subResult.tokens.input;
+        this.totalOutputTokens += subResult.tokens.output;
+        printSubAgentEnd("skill-fork", input.skill_name);
+        return subResult.text || "(Skill produced no output)";
+      } catch (e: any) {
+        printSubAgentEnd("skill-fork", input.skill_name);
+        return `Skill fork error: ${e.message}`;
+      }
+    }
+
+    // Inline mode: return prompt for injection into conversation
+    return `[Skill "${input.skill_name}" activated]\n\n${result.prompt}`;
+  }
+
+  private async executeAgentTool(input: Record<string, any>): Promise<string> {
+    const type = (input.type || "general") as SubAgentType;
+    const description = input.description || "sub-agent task";
+    const prompt = input.prompt || "";
+
+    printSubAgentStart(type, description);
+
+    const config = getSubAgentConfig(type);
+    const subAgent = new Agent({
+      model: this.model,
+      apiKey: this.anthropicClient
+        ? undefined  // Anthropic SDK reads from env
+        : undefined,
+      apiBase: this.useOpenAI ? this.openaiClient?.baseURL : undefined,
+      customSystemPrompt: config.systemPrompt,
+      customTools: config.tools,
+      isSubAgent: true,
+      permissionMode: "bypassPermissions", // Sub-agents don't need confirmation
+    });
+
+    try {
+      const result = await subAgent.runOnce(prompt);
+      // Add sub-agent token usage to parent
+      this.totalInputTokens += result.tokens.input;
+      this.totalOutputTokens += result.tokens.output;
+      printSubAgentEnd(type, description);
+      return result.text || "(Sub-agent produced no output)";
+    } catch (e: any) {
+      printSubAgentEnd(type, description);
+      return `Sub-agent error: ${e.message}`;
+    }
+  }
+
   // ─── Anthropic backend ───────────────────────────────────────
 
   private async chatAnthropic(userMessage: string): Promise<void> {
@@ -297,7 +706,13 @@ export class Agent {
     while (true) {
       if (this.abortController?.signal.aborted) break;
 
+      // Run compression pipeline before API call (tiers 1-3 are zero-cost)
+      this.runCompressionPipeline();
+
+      if (!this.isSubAgent) startSpinner();
       const response = await this.callAnthropicStream();
+      if (!this.isSubAgent) stopSpinner();
+      this.lastApiCallTime = Date.now();
       this.totalInputTokens += response.usage.input_tokens;
       this.totalOutputTokens += response.usage.output_tokens;
       this.lastInputTokenCount = response.usage.input_tokens;
@@ -316,7 +731,17 @@ export class Agent {
       });
 
       if (toolUses.length === 0) {
-        printCost(this.totalInputTokens, this.totalOutputTokens);
+        if (!this.isSubAgent) {
+          printCost(this.totalInputTokens, this.totalOutputTokens);
+        }
+        break;
+      }
+
+      // Budget check after each turn
+      this.currentTurns++;
+      const budget = this.checkBudget();
+      if (budget.exceeded) {
+        printInfo(`Budget exceeded: ${budget.reason}`);
         break;
       }
 
@@ -327,24 +752,31 @@ export class Agent {
         const input = toolUse.input as Record<string, any>;
         printToolCall(toolUse.name, input);
 
-        // Permission check
-        if (!this.yolo) {
-          const confirmMsg = needsConfirmation(toolUse.name, input);
-          if (confirmMsg && !this.confirmedPaths.has(confirmMsg)) {
-            const confirmed = await this.confirmDangerous(confirmMsg);
-            if (!confirmed) {
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: toolUse.id,
-                content: "User denied this action.",
-              });
-              continue;
-            }
-            this.confirmedPaths.add(confirmMsg);
+        // Permission check (mode-aware)
+        const perm = checkPermission(toolUse.name, input, this.permissionMode);
+        if (perm.action === "deny") {
+          printInfo(`Denied: ${perm.message}`);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: `Action denied: ${perm.message}`,
+          });
+          continue;
+        }
+        if (perm.action === "confirm" && perm.message && !this.confirmedPaths.has(perm.message)) {
+          const confirmed = await this.confirmDangerous(perm.message);
+          if (!confirmed) {
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: toolUse.id,
+              content: "User denied this action.",
+            });
+            continue;
           }
+          this.confirmedPaths.add(perm.message);
         }
 
-        const result = await executeTool(toolUse.name, input);
+        const result = await this.executeToolCall(toolUse.name, input);
         printToolResult(toolUse.name, result);
         toolResults.push({
           type: "tool_result",
@@ -360,35 +792,56 @@ export class Agent {
 
   private async callAnthropicStream(): Promise<Anthropic.Message> {
     return withRetry(async (signal) => {
+      const maxOutput = getMaxOutputTokens(this.model);
       const createParams: any = {
         model: this.model,
-        max_tokens: this.thinking ? 16000 : 8096,
+        max_tokens: this.thinkingMode !== "disabled" ? maxOutput : 16384,
         system: this.systemPrompt,
-        tools: toolDefinitions,
+        tools: this.tools,
         messages: this.anthropicMessages,
       };
 
       // Extended thinking support (Anthropic only)
-      if (this.thinking) {
-        createParams.thinking = { type: "enabled", budget_tokens: 10000 };
+      // Mirrors Claude Code: adaptive for 4.6 models, enabled with budget for older
+      if (this.thinkingMode === "adaptive") {
+        createParams.thinking = { type: "enabled", budget_tokens: maxOutput - 1 };
+      } else if (this.thinkingMode === "enabled") {
+        createParams.thinking = { type: "enabled", budget_tokens: maxOutput - 1 };
       }
 
       const stream = this.anthropicClient!.messages.stream(createParams, { signal });
 
+      // Stream text content (SDK high-level event)
       let firstText = true;
-      stream.on("text", (text) => {
-        if (firstText) { printAssistantText("\n"); firstText = false; }
-        printAssistantText(text);
+      stream.on("text", (text: string) => {
+        if (firstText) { stopSpinner(); this.emitText("\n"); firstText = false; }
+        this.emitText(text);
       });
+
+      // Stream thinking content if enabled (SDK high-level event)
+      if (this.thinkingMode !== "disabled") {
+        let inThinking = false;
+        stream.on("streamEvent" as any, (event: any) => {
+          if (event.type === "content_block_start" && event.content_block?.type === "thinking") {
+            inThinking = true;
+            stopSpinner();
+            this.emitText("\n" + chalk.dim("  [thinking] "));
+          } else if (event.type === "content_block_delta" && event.delta?.type === "thinking_delta" && inThinking) {
+            this.emitText(chalk.dim(event.delta.thinking));
+          } else if (event.type === "content_block_stop" && inThinking) {
+            this.emitText("\n");
+            inThinking = false;
+          }
+        });
+      }
 
       const finalMessage = await stream.finalMessage();
 
-      // Filter out thinking blocks from content (don't store in history)
-      if (this.thinking) {
-        finalMessage.content = finalMessage.content.filter(
-          (block: any) => block.type !== "thinking"
-        );
-      }
+      // Filter out thinking blocks from stored history
+      // (Claude Code preserves redacted blocks, but for simplicity we strip them)
+      finalMessage.content = finalMessage.content.filter(
+        (block: any) => block.type !== "thinking"
+      );
 
       return finalMessage;
     }, this.abortController?.signal);
@@ -402,7 +855,13 @@ export class Agent {
     while (true) {
       if (this.abortController?.signal.aborted) break;
 
+      // Run compression pipeline before API call
+      this.runCompressionPipeline();
+
+      if (!this.isSubAgent) startSpinner();
       const response = await this.callOpenAIStream();
+      if (!this.isSubAgent) stopSpinner();
+      this.lastApiCallTime = Date.now();
 
       // Track tokens
       if (response.usage) {
@@ -411,7 +870,8 @@ export class Agent {
         this.lastInputTokenCount = response.usage.prompt_tokens;
       }
 
-      const choice = response.choices[0];
+      const choice = response.choices?.[0];
+      if (!choice) break;
       const message = choice.message;
 
       // Add assistant message to history
@@ -420,7 +880,17 @@ export class Agent {
       // If no tool calls, we're done
       const toolCalls = message.tool_calls;
       if (!toolCalls || toolCalls.length === 0) {
-        printCost(this.totalInputTokens, this.totalOutputTokens);
+        if (!this.isSubAgent) {
+          printCost(this.totalInputTokens, this.totalOutputTokens);
+        }
+        break;
+      }
+
+      // Budget check after each turn
+      this.currentTurns++;
+      const budget = this.checkBudget();
+      if (budget.exceeded) {
+        printInfo(`Budget exceeded: ${budget.reason}`);
         break;
       }
 
@@ -438,24 +908,31 @@ export class Agent {
 
         printToolCall(fnName, input);
 
-        // Permission check
-        if (!this.yolo) {
-          const confirmMsg = needsConfirmation(fnName, input);
-          if (confirmMsg && !this.confirmedPaths.has(confirmMsg)) {
-            const confirmed = await this.confirmDangerous(confirmMsg);
-            if (!confirmed) {
-              this.openaiMessages.push({
-                role: "tool",
-                tool_call_id: tc.id,
-                content: "User denied this action.",
-              });
-              continue;
-            }
-            this.confirmedPaths.add(confirmMsg);
+        // Permission check (mode-aware)
+        const perm = checkPermission(fnName, input, this.permissionMode);
+        if (perm.action === "deny") {
+          printInfo(`Denied: ${perm.message}`);
+          this.openaiMessages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: `Action denied: ${perm.message}`,
+          });
+          continue;
+        }
+        if (perm.action === "confirm" && perm.message && !this.confirmedPaths.has(perm.message)) {
+          const confirmed = await this.confirmDangerous(perm.message);
+          if (!confirmed) {
+            this.openaiMessages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: "User denied this action.",
+            });
+            continue;
           }
+          this.confirmedPaths.add(perm.message);
         }
 
-        const result = await executeTool(fnName, input);
+        const result = await this.executeToolCall(fnName, input);
         printToolResult(fnName, result);
 
         this.openaiMessages.push({
@@ -473,8 +950,8 @@ export class Agent {
     return withRetry(async (signal) => {
       const stream = await this.openaiClient!.chat.completions.create({
         model: this.model,
-        max_tokens: 8096,
-        tools: toOpenAITools(),
+        max_tokens: 16384,
+        tools: toOpenAITools(this.tools),
         messages: this.openaiMessages,
         stream: true,
         stream_options: { include_usage: true },
@@ -502,8 +979,8 @@ export class Agent {
 
         // Stream text content
         if (delta.content) {
-          if (firstText) { printAssistantText("\n"); firstText = false; }
-          printAssistantText(delta.content);
+          if (firstText) { stopSpinner(); this.emitText("\n"); firstText = false; }
+          this.emitText(delta.content);
           content += delta.content;
         }
 
@@ -566,6 +1043,13 @@ export class Agent {
 
   private async confirmDangerous(command: string): Promise<boolean> {
     printConfirmation(command);
+    // Use external confirmFn if provided (REPL mode passes one that reuses
+    // the existing readline, avoiding the classic Node.js bug where a second
+    // readline.createInterface on the same stdin kills the first one on close).
+    if (this.confirmFn) {
+      return this.confirmFn(command);
+    }
+    // Fallback for one-shot / non-REPL usage: create a temporary readline
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,

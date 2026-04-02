@@ -3,6 +3,9 @@ import { join, resolve } from "path";
 import { execSync } from "child_process";
 import * as os from "os";
 import { fileURLToPath } from "url";
+import { buildMemoryPromptSection } from "./memory.js";
+import { buildSkillDescriptions } from "./skills.js";
+import { buildAgentDescriptions } from "./subagent.js";
 
 // ─── CLAUDE.md loader ────────────────────────────────────────
 
@@ -50,15 +53,24 @@ export function buildSystemPrompt(): string {
 
   const date = new Date().toISOString().split("T")[0];
   const platform = `${os.platform()} ${os.arch()}`;
-  const shell = process.env.SHELL || "unknown";
+  const shell = process.platform === "win32"
+    ? (process.env.ComSpec || "cmd.exe")
+    : (process.env.SHELL || "/bin/sh");
   const gitContext = getGitContext();
   const claudeMd = loadClaudeMd();
+  const memorySection = buildMemoryPromptSection();
+  const skillsSection = buildSkillDescriptions();
+  const agentSection = buildAgentDescriptions();
 
+  // Use split/join to replace ALL occurrences and avoid $ special chars
   return template
-    .replace("{{cwd}}", process.cwd())
-    .replace("{{date}}", date)
-    .replace("{{platform}}", platform)
-    .replace("{{shell}}", shell)
-    .replace("{{git_context}}", gitContext)
-    .replace("{{claude_md}}", claudeMd);
+    .split("{{cwd}}").join(process.cwd())
+    .split("{{date}}").join(date)
+    .split("{{platform}}").join(platform)
+    .split("{{shell}}").join(shell)
+    .split("{{git_context}}").join(gitContext)
+    .split("{{claude_md}}").join(claudeMd)
+    .split("{{memory}}").join(memorySection)
+    .split("{{skills}}").join(skillsSection)
+    .split("{{agents}}").join(agentSection);
 }
