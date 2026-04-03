@@ -6,13 +6,13 @@
 
 ```mermaid
 graph TB
-    subgraph 第0层：执行时截断
+    subgraph 第0层:执行时截断
         Tool[工具执行结果] --> Trunc{> 50K 字符?}
-        Trunc -->|是| Cut[截断：保留头尾]
+        Trunc -->|是| Cut[截断:保留头尾]
         Trunc -->|否| Pass[直接返回]
     end
 
-    subgraph "4层压缩管道（每次 API 调用前）"
+    subgraph "4层压缩管道:每次 API 调用前"
         T1[Tier 1: Budget] -->|50-70%: 30K<br/>70-85%: 15K| T2[Tier 2: Snip]
         T2 -->|同文件重复读取<br/>旧搜索结果| T3[Tier 3: Microcompact]
         T3 -->|空闲 >5min<br/>cache 已冷| T4[Tier 4: Auto-compact]
