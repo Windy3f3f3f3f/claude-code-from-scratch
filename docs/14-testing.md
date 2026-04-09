@@ -6,7 +6,7 @@
 
 ```mermaid
 graph LR
-    Setup["bash test/setup.sh"] --> Build["npm run build"]
+    Setup["bash test/setup.sh"] --> Build["npm run build（TS 版）"]
     Build --> Test["逐项测试"]
     Test --> Cleanup["bash test/cleanup.sh"]
 
@@ -33,7 +33,7 @@ cd claude-code-from-scratch
 # 一键配置测试环境（MCP、Skills、CLAUDE.md、大文件、引号测试文件、自定义 Agent）
 bash test/setup.sh
 
-# 构建 TS 版
+# 构建 TS 版（Python 版无需构建）
 npm run build
 ```
 
@@ -48,6 +48,7 @@ ANTHROPIC_BASE_URL=https://aihubmix.com   # 可选
 
 ## 启动方式
 
+**TS 版**：
 ```bash
 # 交互式 REPL（推荐，能测 skill、plan mode 和 REPL 命令）
 node dist/cli.js --yolo
@@ -55,6 +56,16 @@ node dist/cli.js --yolo
 # one-shot 模式
 node dist/cli.js --yolo "你的提示词"
 ```
+
+**Python 版**：
+```bash
+python -m mini_claude --yolo
+
+# one-shot 模式
+python -m mini_claude --yolo "你的提示词"
+```
+
+> 以下测试步骤中的命令行示例以 TS 版为例，Python 版将 `node dist/cli.js` 替换为 `python -m mini_claude` 即可，功能完全一致。
 
 ---
 
@@ -106,7 +117,12 @@ Fetch https://example.com and tell me what the page is about.
 Read the files src/frontmatter.ts, src/session.ts, and src/skills.ts at the same time, then tell me each file's line count.
 ```
 
-✅ 预期：三个 `read_file` 调用同时出现（不是一个一个来的）
+Python 版可改为读取 Python 文件：
+```
+Read the files python/mini_claude/frontmatter.py and python/mini_claude/session.py at the same time, then tell me each file's line count.
+```
+
+✅ 预期：多个 `read_file` 调用同时出现（不是一个一个来的）
 
 **设计意图**：`CONCURRENCY_SAFE_TOOLS`（read_file、list_files、grep_search、web_fetch）标记为可并行，Agent 在流式输出阶段就开始执行这些工具，不等模型生成完毕。
 
@@ -441,7 +457,8 @@ Create a file test/tmp/long-file.txt with 50 numbered lines like "Line 1: test d
 
 **第一次会话**：
 ```bash
-node dist/cli.js --yolo
+node dist/cli.js --yolo          # TS 版
+python -m mini_claude --yolo     # Python 版
 ```
 ```
 Remember this: The secret code is BANANA-42. Read package.json and tell me the version.
@@ -450,7 +467,8 @@ Remember this: The secret code is BANANA-42. Read package.json and tell me the v
 
 **第二次会话（恢复）**：
 ```bash
-node dist/cli.js --yolo --resume
+node dist/cli.js --yolo --resume          # TS 版
+python -m mini_claude --yolo --resume     # Python 版
 ```
 
 ✅ 预期：启动时显示 session restored 信息
@@ -463,7 +481,8 @@ What was the secret code I told you earlier?
 
 **对比（新会话）**：
 ```bash
-node dist/cli.js --yolo
+node dist/cli.js --yolo          # TS 版
+python -m mini_claude --yolo     # Python 版
 ```
 ```
 What was the secret code I told you earlier?
@@ -479,7 +498,10 @@ What was the secret code I told you earlier?
 **测试目标**：验证传入 prompt 参数时自动执行并退出。
 
 ```bash
+# TS 版
 node dist/cli.js --yolo "Read the file package.json and tell me the project name. Only output the name."
+# Python 版
+python -m mini_claude --yolo "Read the file package.json and tell me the project name. Only output the name."
 ```
 
 ✅ 预期：
@@ -505,7 +527,10 @@ node dist/cli.js --yolo "Read the file /nonexistent/path/file.txt"
 **测试目标**：验证 agent 循环次数限制。
 
 ```bash
+# TS 版
 node dist/cli.js --yolo --max-turns 2 "Read these files one by one: package.json, tsconfig.json, src/cli.ts, src/agent.ts, src/tools.ts. Tell me the line count of each."
+# Python 版
+python -m mini_claude --yolo --max-turns 2 "Read these files one by one: package.json, tsconfig.json, src/cli.ts, src/agent.ts, src/tools.ts. Tell me the line count of each."
 ```
 
 ✅ 预期：
