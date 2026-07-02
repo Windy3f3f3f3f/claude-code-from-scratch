@@ -451,8 +451,8 @@ function grepJS(pattern: string, dir: string, include?: string): string {
   const re = new RegExp(pattern);
   const includeRe = include ? new RegExp(include.replace(/\*/g, ".*").replace(/\?/g, ".")) : null;
   const matches: string[] = [];
+  let extra = 0;
   function walk(d: string) {
-    if (matches.length >= 200) return;
     let entries: string[];
     try { entries = readdirSync(d); } catch { return; }
     for (const name of entries) {
@@ -467,8 +467,10 @@ function grepJS(pattern: string, dir: string, include?: string): string {
         const lines = text.split("\n");
         for (let i = 0; i < lines.length; i++) {
           if (re.test(lines[i])) {
-            matches.push(`${full}:${i + 1}:${lines[i]}`);
-            if (matches.length >= 200) return;
+            // Show at most 100 matches, but keep counting so the model
+            // knows how many were omitted.
+            if (matches.length < 100) matches.push(`${full}:${i + 1}:${lines[i]}`);
+            else extra++;
           }
         }
       } catch {}
@@ -476,9 +478,8 @@ function grepJS(pattern: string, dir: string, include?: string): string {
   }
   walk(dir);
   if (matches.length === 0) return "No matches found.";
-  const shown = matches.slice(0, 100);
-  return shown.join("\n") +
-    (matches.length > 100 ? `\n... and ${matches.length - 100} more matches` : "");
+  return matches.join("\n") +
+    (extra ? `\n... and ${extra} more matches` : "");
 }
 
 function runShell(input: { command: string; timeout?: number }): string {

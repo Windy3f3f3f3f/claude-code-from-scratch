@@ -370,10 +370,10 @@ def _grep_python(pattern: str, directory: str, include: str | None) -> str:
     regex = re.compile(pattern)
     include_pattern = include
     matches: list[str] = []
+    extra = 0
 
     def walk(d: str) -> None:
-        if len(matches) >= 200:
-            return
+        nonlocal extra
         try:
             entries = os.listdir(d)
         except Exception:
@@ -391,18 +391,21 @@ def _grep_python(pattern: str, directory: str, include: str | None) -> str:
                 text = Path(full).read_text(errors="replace")
                 for i, line in enumerate(text.split("\n")):
                     if regex.search(line):
-                        matches.append(f"{full}:{i+1}:{line}")
-                        if len(matches) >= 200:
-                            return
+                        # Show at most 100 matches, but keep counting so the
+                        # model knows how many were omitted.
+                        if len(matches) < 100:
+                            matches.append(f"{full}:{i+1}:{line}")
+                        else:
+                            extra += 1
             except Exception:
                 pass
 
     walk(directory)
     if not matches:
         return "No matches found."
-    output = "\n".join(matches[:100])
-    if len(matches) > 100:
-        output += f"\n... and {len(matches) - 100} more matches"
+    output = "\n".join(matches)
+    if extra:
+        output += f"\n... and {extra} more matches"
     return output
 
 
