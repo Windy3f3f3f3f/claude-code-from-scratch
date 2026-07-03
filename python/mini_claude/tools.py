@@ -201,7 +201,10 @@ def get_deferred_tool_names(all_tools: list[ToolDef] | None = None) -> list[str]
 
 def _read_file(inp: dict) -> str:
     try:
-        content = Path(inp["file_path"]).read_text()
+        # errors="replace": undecodable bytes become U+FFFD instead of
+        # raising — same behavior as Node's readFileSync("utf-8") in the TS
+        # version, so both implementations return content for mixed files.
+        content = Path(inp["file_path"]).read_text(encoding="utf-8", errors="replace")
         lines = content.split("\n")
         numbered = "\n".join(f"{i+1:4d} | {line}" for i, line in enumerate(lines))
         return numbered

@@ -1239,6 +1239,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         async def _do():
             stream = await self._openai_client.chat.completions.create(
                 model=self.model,
+                max_tokens=16384,
                 tools=_to_openai_tools(get_active_tool_definitions(self.tools)),
                 messages=self._openai_messages,
                 stream=True,

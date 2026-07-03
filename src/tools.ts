@@ -508,6 +508,11 @@ function runShell(input: { command: string; timeout?: number }): string {
   } catch (e: any) {
     const stderr = e.stderr ? `\nStderr: ${e.stderr}` : "";
     const stdout = e.stdout ? `\nStdout: ${e.stdout}` : "";
+    // Timeout kills leave status null — report it as a timeout like the
+    // Python version instead of "exit code null"
+    if (e.code === "ETIMEDOUT" || (e.signal === "SIGTERM" && e.status === null)) {
+      return `Command timed out after ${input.timeout || 30000}ms${stdout}${stderr}`;
+    }
     return `Command failed (exit code ${e.status})${stdout}${stderr}`;
   }
 }
