@@ -199,9 +199,12 @@ export class Agent {
   // Read-before-edit: track file read timestamps (absolutePath → mtimeMs)
   private readFileState: Map<string, number> = new Map();
 
-  // Memory recall state — semantic prefetch per user turn
+  // Memory recall state — semantic prefetch per user turn. The handle lives
+  // on the instance so a recall that settles after this turn's last API call
+  // is carried over and injected next turn (issue #7).
   private alreadySurfacedMemories: Set<string> = new Set();
   private sessionMemoryBytes = 0;
+  private memoryPrefetch: MemoryPrefetch | null = null;
 
   // Separate message histories for each backend
   private anthropicMessages: Anthropic.MessageParam[] = [];
@@ -768,6 +771,50 @@ export class Agent {
     return truncateResult(`[Result too large (${sizeKB} KB, ${lines.length} lines). Full output saved to ${filepath}. You can use read_file to see the full result.]\n\nPreview (first 200 lines):\n${preview}`);
   }
 
+  // ─── Memory prefetch lifecycle (shared by both backends) ────
+
+  private async consumeMemoryPrefetchIfReady(messages: any[]): Promise<void> {
+    const pf = this.memoryPrefetch;
+    if (!pf || !pf.settled || pf.consumed) return;
+    pf.consumed = true;
+    try {
+      const memories = await pf.promise;
+      if (memories.length === 0) return;
+      const injectionText = formatMemoriesForInjection(memories);
+      const last = messages[messages.length - 1];
+      if (last && last.role === "user") {
+        // Append to the existing user message to maintain alternation
+        if (typeof last.content === "string" || last.content == null) {
+          last.content = (last.content || "") + "\n\n" + injectionText;
+        } else if (Array.isArray(last.content)) {
+          (last.content as any[]).push({ type: "text", text: injectionText });
+        }
+      } else {
+        messages.push({ role: "user", content: injectionText });
+      }
+      for (const m of memories) {
+        this.alreadySurfacedMemories.add(m.path);
+        this.sessionMemoryBytes += Buffer.byteLength(m.content);
+      }
+    } catch { /* prefetch errors already logged */ }
+  }
+
+  private async startMemoryPrefetchForTurn(userMessage: string, messages: any[]): Promise<void> {
+    // Drain any carry-over prefetch from the previous turn — a recall that
+    // settled after that turn's last API call would otherwise be dropped
+    // (issue #7).
+    await this.consumeMemoryPrefetchIfReady(messages);
+    if (this.isSubAgent) return;
+    const sq = this.buildSideQuery();
+    if (sq) {
+      this.memoryPrefetch = startMemoryPrefetch(
+        userMessage, sq,
+        this.alreadySurfacedMemories, this.sessionMemoryBytes,
+        this.abortController?.signal,
+      );
+    }
+  }
+
   private async executeToolCall(
     name: string,
     input: Record<string, any>
@@ -985,18 +1032,8 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
     // tool_use ↔ tool_result pair from the previous turn's tool execution.
     await this.checkAndCompact();
 
-    // Start async memory prefetch (non-blocking, fires once per user turn)
-    let memoryPrefetch: MemoryPrefetch | null = null;
-    if (!this.isSubAgent) {
-      const sq = this.buildSideQuery();
-      if (sq) {
-        memoryPrefetch = startMemoryPrefetch(
-          userMessage, sq,
-          this.alreadySurfacedMemories, this.sessionMemoryBytes,
-          this.abortController?.signal,
-        );
-      }
-    }
+    // Memory prefetch: drain carry-over, then start fresh (issue #7)
+    await this.startMemoryPrefetchForTurn(userMessage, this.anthropicMessages);
 
     let firstIteration = true;
 
@@ -1008,32 +1045,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
       // Consume memory prefetch if settled (non-blocking poll, zero-wait).
       // Checked every iteration so the model sees recalled memories ASAP.
-      // Memories are appended to the last user message (or added as a new one)
-      // to avoid consecutive user messages which violate the API's alternation rule.
-      if (memoryPrefetch && memoryPrefetch.settled && !memoryPrefetch.consumed) {
-        memoryPrefetch.consumed = true;
-        try {
-          const memories = await memoryPrefetch.promise;
-          if (memories.length > 0) {
-            const injectionText = formatMemoriesForInjection(memories);
-            const last = this.anthropicMessages[this.anthropicMessages.length - 1];
-            if (last && last.role === "user") {
-              // Append to existing user message to maintain alternation
-              if (typeof last.content === "string") {
-                last.content = last.content + "\n\n" + injectionText;
-              } else if (Array.isArray(last.content)) {
-                (last.content as any[]).push({ type: "text", text: injectionText });
-              }
-            } else {
-              this.anthropicMessages.push({ role: "user", content: injectionText });
-            }
-            for (const m of memories) {
-              this.alreadySurfacedMemories.add(m.path);
-              this.sessionMemoryBytes += Buffer.byteLength(m.content);
-            }
-          }
-        } catch { /* prefetch errors already logged */ }
-      }
+      await this.consumeMemoryPrefetchIfReady(this.anthropicMessages);
 
       if (!this.isSubAgent) startSpinner();
 
@@ -1253,17 +1265,8 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
     // won't orphan a tool_calls / tool message pair.
     await this.checkAndCompact();
 
-    // Start async memory prefetch (non-blocking, fires once per user turn)
-    let memoryPrefetch: MemoryPrefetch | null = null;
-    if (!this.isSubAgent) {
-      const sq = this.buildSideQuery();
-      if (sq) {
-        memoryPrefetch = startMemoryPrefetch(
-          userMessage, sq,
-          this.alreadySurfacedMemories, this.sessionMemoryBytes,
-        );
-      }
-    }
+    // Memory prefetch: drain carry-over, then start fresh (issue #7)
+    await this.startMemoryPrefetchForTurn(userMessage, this.openaiMessages);
 
     while (true) {
       if (this.abortController?.signal.aborted) break;
@@ -1272,25 +1275,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       this.runCompressionPipeline();
 
       // Consume memory prefetch if settled (non-blocking poll, zero-wait)
-      if (memoryPrefetch && memoryPrefetch.settled && !memoryPrefetch.consumed) {
-        memoryPrefetch.consumed = true;
-        try {
-          const memories = await memoryPrefetch.promise;
-          if (memories.length > 0) {
-            const injectionText = formatMemoriesForInjection(memories);
-            const last = this.openaiMessages[this.openaiMessages.length - 1];
-            if (last && last.role === "user") {
-              last.content = (last.content || "") + "\n\n" + injectionText;
-            } else {
-              this.openaiMessages.push({ role: "user", content: injectionText });
-            }
-            for (const m of memories) {
-              this.alreadySurfacedMemories.add(m.path);
-              this.sessionMemoryBytes += Buffer.byteLength(m.content);
-            }
-          }
-        } catch { /* prefetch errors already logged */ }
-      }
+      await this.consumeMemoryPrefetchIfReady(this.openaiMessages);
 
       if (!this.isSubAgent) startSpinner();
       const response = await this.callOpenAIStream();

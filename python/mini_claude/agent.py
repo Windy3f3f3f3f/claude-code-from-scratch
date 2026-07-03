@@ -213,9 +213,12 @@ class Agent:
         self._mcp_manager = McpManager()
         self._mcp_initialized = False
 
-        # Memory recall state — semantic prefetch per user turn
+        # Memory recall state — semantic prefetch per user turn. The handle
+        # lives on the instance so a recall that settles after this turn's
+        # last API call is carried over and injected next turn (issue #7).
         self._already_surfaced_memories: set[str] = set()
         self._session_memory_bytes = 0
+        self._memory_prefetch: MemoryPrefetch | None = None
 
         # Separate message histories
         self._anthropic_messages: list[dict] = []
@@ -847,6 +850,49 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
     # ─── Anthropic backend ───────────────────────────────────────
 
+    def _consume_memory_prefetch_if_ready(self, messages: list) -> None:
+        """Inject recalled memories if the prefetch settled (non-blocking).
+        Appends to the last user message to keep user/assistant alternation."""
+        pf = self._memory_prefetch
+        if not (pf and pf.settled and not pf.consumed):
+            return
+        pf.consumed = True
+        try:
+            memories = pf.task.result()
+            if not memories:
+                return
+            injection_text = format_memories_for_injection(memories)
+            last = messages[-1] if messages else None
+            if last and last.get("role") == "user":
+                content = last.get("content", "")
+                if isinstance(content, str) or content is None:
+                    last["content"] = (content or "") + "\n\n" + injection_text
+                elif isinstance(content, list):
+                    content.append({"type": "text", "text": injection_text})
+            else:
+                messages.append({"role": "user", "content": injection_text})
+            for m in memories:
+                self._already_surfaced_memories.add(m.path)
+                self._session_memory_bytes += len(m.content.encode())
+        except Exception:
+            pass  # prefetch errors already logged
+
+    def _start_memory_prefetch_for_turn(self, user_message: str, messages: list) -> None:
+        """Drain any carry-over prefetch from the previous turn (a recall
+        that settled after the last API call would otherwise be dropped —
+        issue #7), then start a fresh prefetch for this query."""
+        self._consume_memory_prefetch_if_ready(messages)
+        if self.is_sub_agent:
+            return
+        if self._memory_prefetch and not self._memory_prefetch.settled:
+            self._memory_prefetch.task.cancel()
+        sq = self._build_side_query()
+        if sq:
+            self._memory_prefetch = start_memory_prefetch(
+                user_message, sq,
+                self._already_surfaced_memories, self._session_memory_bytes,
+            )
+
     async def _chat_anthropic(self, user_message: str) -> None:
         self._anthropic_messages.append({"role": "user", "content": user_message})
         # Auto-compact at turn boundary only — the last message is now plain
@@ -854,15 +900,8 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         # tool_use ↔ tool_result pair from the previous turn's tool execution.
         await self._check_and_compact()
 
-        # Start async memory prefetch (non-blocking, fires once per user turn)
-        memory_prefetch: MemoryPrefetch | None = None
-        if not self.is_sub_agent:
-            sq = self._build_side_query()
-            if sq:
-                memory_prefetch = start_memory_prefetch(
-                    user_message, sq,
-                    self._already_surfaced_memories, self._session_memory_bytes,
-                )
+        # Memory prefetch: drain carry-over, then start fresh (issue #7)
+        self._start_memory_prefetch_for_turn(user_message, self._anthropic_messages)
 
         while True:
             if self._aborted:
@@ -870,28 +909,8 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
             self._run_compression_pipeline()
 
-            # Consume memory prefetch if settled (non-blocking poll, zero-wait).
-            # Append to last user message to maintain user/assistant alternation.
-            if memory_prefetch and memory_prefetch.settled and not memory_prefetch.consumed:
-                memory_prefetch.consumed = True
-                try:
-                    memories = memory_prefetch.task.result()
-                    if memories:
-                        injection_text = format_memories_for_injection(memories)
-                        last = self._anthropic_messages[-1] if self._anthropic_messages else None
-                        if last and last.get("role") == "user":
-                            content = last.get("content", "")
-                            if isinstance(content, str):
-                                last["content"] = content + "\n\n" + injection_text
-                            elif isinstance(content, list):
-                                content.append({"type": "text", "text": injection_text})
-                        else:
-                            self._anthropic_messages.append({"role": "user", "content": injection_text})
-                        for m in memories:
-                            self._already_surfaced_memories.add(m.path)
-                            self._session_memory_bytes += len(m.content.encode())
-                except Exception:
-                    pass  # prefetch errors already logged
+            # Consume memory prefetch if settled (non-blocking poll, zero-wait)
+            self._consume_memory_prefetch_if_ready(self._anthropic_messages)
 
             if not self.is_sub_agent:
                 start_spinner()
@@ -1087,15 +1106,8 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         # _compact_openai won't orphan a tool_calls / tool message pair.
         await self._check_and_compact()
 
-        # Start async memory prefetch (non-blocking, fires once per user turn)
-        memory_prefetch: MemoryPrefetch | None = None
-        if not self.is_sub_agent:
-            sq = self._build_side_query()
-            if sq:
-                memory_prefetch = start_memory_prefetch(
-                    user_message, sq,
-                    self._already_surfaced_memories, self._session_memory_bytes,
-                )
+        # Memory prefetch: drain carry-over, then start fresh (issue #7)
+        self._start_memory_prefetch_for_turn(user_message, self._openai_messages)
 
         while True:
             if self._aborted:
@@ -1104,22 +1116,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             self._run_compression_pipeline()
 
             # Consume memory prefetch if settled (non-blocking poll, zero-wait)
-            if memory_prefetch and memory_prefetch.settled and not memory_prefetch.consumed:
-                memory_prefetch.consumed = True
-                try:
-                    memories = memory_prefetch.task.result()
-                    if memories:
-                        injection_text = format_memories_for_injection(memories)
-                        last = self._openai_messages[-1] if self._openai_messages else None
-                        if last and last.get("role") == "user":
-                            last["content"] = (last.get("content") or "") + "\n\n" + injection_text
-                        else:
-                            self._openai_messages.append({"role": "user", "content": injection_text})
-                        for m in memories:
-                            self._already_surfaced_memories.add(m.path)
-                            self._session_memory_bytes += len(m.content.encode())
-                except Exception:
-                    pass  # prefetch errors already logged
+            self._consume_memory_prefetch_if_ready(self._openai_messages)
 
             if not self.is_sub_agent:
                 start_spinner()
