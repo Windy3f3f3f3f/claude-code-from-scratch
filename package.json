@@ -10,9 +10,13 @@
     "build": "tsc",
     "start": "node dist/cli.js",
     "dev": "tsc && node dist/cli.js",
-    "test": "node -e \"require('node:fs').rmSync('dist-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "test:unit": "node -e \"require('node:fs').rmSync('dist-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "test:integration": "tsc && node --test test/integration/*.test.mjs",
+    "test:integration:py": "tsc && node --test test/integration/python-parity.test.mjs",
+    "test": "npm run test:unit && npm run test:integration",
     "test:py": "python3 -B -m unittest discover -s python/tests -p \"test_*.py\"",
-    "check": "npm run build && npm test && npm run test:py"
+    "check": "npm run test && npm run test:py",
+    "check:full": "npm run check && npm run test:integration:py"
   },
   "keywords": [
     "claude-code",
