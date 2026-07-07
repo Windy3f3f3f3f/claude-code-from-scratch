@@ -68,6 +68,10 @@ Why we didn't implement it: tree-sitter is a native C/C++ library requiring a `n
 
 Prompt Caching has now been added the way Claude Code does it; details are in [Chapter 7: Prefix Caching](/en/docs/07-context.md). The approach marks the static portion of the system prompt with `cache_control: { type: "ephemeral" }` and rolls a breakpoint onto the last message; a cache-hit prefix is billed at 0.1x. From the second turn onward in a multi-turn conversation, the accumulated system prompt, tool definitions, and history messages are mostly read from cache, and only the newest increment needs to be reprocessed.
 
+### The Autonomy Trio (Done)
+
+`/goal`, `/loop`, and Auto Mode have also been added; details are in [Chapter 15: Autonomy & Continuation](/en/docs/15-autonomy.md). They let the agent keep moving across many turns with nobody watching: `/goal` chases a stopping condition with an independent evaluator until it is met or judged impossible, `/loop` lets the main model schedule its next run on an interval or at a self-chosen pace, and Auto Mode replaces the confirmation prompt for dangerous actions with a classifier that reads a reasoning-blind transcript. The prompts are quoted verbatim from the leaked binary; a few teaching simplifications are made along the way (single-stage classifier, an in-session timer instead of KAIROS) -- the "Extension Directions" further down that originally sketched such capabilities can be read against Chapter 15 to see how far they are now realized.
+
 ### Phase 2: Extensibility (3-5 days)
 
 | Enhancement | Problem Solved | Estimated Code |
@@ -182,17 +186,20 @@ Want to dive deeper into the design principles of each Claude Code module? Check
 | Plan Mode | [Ch10: Plan Mode](/en/docs/10-plan-mode.md) | -- |
 | Multi-Agent | [Ch11: Multi-Agent](/en/docs/11-multi-agent.md) | [Multi-Agent Architecture](https://windy3f3f3f3f.github.io/how-claude-code-works/#/docs/07-multi-agent) |
 | MCP integration | [Ch12: MCP Integration](/en/docs/12-mcp.md) | -- |
+| Autonomy & continuation | [Ch15: Autonomy & Continuation](/en/docs/15-autonomy.md) | [Autonomy /goal /loop](https://windy3f3f3f3f.github.io/how-claude-code-works/#/en/docs/17-autonomy-goal-loop) · [Auto Mode](https://windy3f3f3f3f.github.io/how-claude-code-works/#/en/docs/18-auto-mode) · [Dynamic Workflows](https://windy3f3f3f3f.github.io/how-claude-code-works/#/en/docs/19-dynamic-workflows) |
 
 ---
 
 ## Conclusion
 
-~4300 lines of code (TS) / ~3800 lines (Python), 12 files, covering the core components and advanced capabilities of a coding agent:
+~5400 lines of code (TS) / ~5000 lines (Python), 12 files, covering the core components, advanced capabilities, and autonomous operation of a coding agent:
 
 **Phase 1 -- Core Components:** Agent Loop, Tool System (13 tools + mtime protection + lazy loading + parallel execution), System Prompt (Markdown template + @include + environment injection), CLI / Session (REPL + JSON persistence), Streaming Output (Anthropic + OpenAI dual backend + streaming tool execution), Permission Security (5 modes + declarative rules + regex + confirmation), Context Management (4-layer compression + large result persistence)
 
 **Phase 2 -- Advanced Capabilities:** Memory System (semantic recall + async prefetch), Skills System (inline/fork dual mode), Plan Mode (read-only planning + 4-option approval), Multi-Agent (Sub-Agent + 3 built-in types + custom), MCP Integration (JSON-RPC over stdio), Budget Control
 
-A huge amount of the code in Claude Code's 500,000 lines is edge case handling and enterprise-grade reliability. But the core agent capabilities -- understand user intent -> call tools to manipulate code -> iterate until complete -- are exactly what these ~3400 lines do.
+**Phase 3 -- Autonomous Operation:** `/goal` (an evaluator chases the stopping condition to the end + impossible brake), `/loop` (interval scheduling + dynamic self-pacing + `schedule_wakeup`), Auto Mode (transcript-classifier permission gate + reasoning-blind projection + fail-closed + denial fallback)
+
+A huge amount of the code in Claude Code's 500,000 lines is edge case handling and enterprise-grade reliability. But the core agent capabilities -- understand user intent -> call tools to manipulate code -> iterate until complete -- are exactly what these few thousand lines do.
 
 Now you have a feature-rich coding agent, and you understand the design intent behind every line of code. Go extend it.

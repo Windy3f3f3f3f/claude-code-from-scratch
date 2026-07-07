@@ -39,6 +39,8 @@ function parseArgs(): ParsedArgs {
       permissionMode = "acceptEdits";
     } else if (args[i] === "--dont-ask") {
       permissionMode = "dontAsk";
+    } else if (args[i] === "--auto") {
+      permissionMode = "auto";
     } else if (args[i] === "--thinking") {
       thinking = true;
     } else if (args[i] === "--model" || args[i] === "-m") {
@@ -62,6 +64,7 @@ Options:
   --plan              Plan mode: read-only, describe changes without executing
   --accept-edits      Auto-approve file edits, still confirm dangerous shell
   --dont-ask          Auto-deny anything needing confirmation (for CI)
+  --auto              Auto Mode: an LLM classifier judges each action instead of asking
   --thinking          Enable extended thinking (Anthropic only)
   --model, -m         Model to use (default: claude-opus-4-6, or MINI_CLAUDE_MODEL env)
   --api-base URL      Use OpenAI-compatible API endpoint (key via env var)
@@ -75,6 +78,9 @@ REPL commands:
   /plan               Toggle plan mode (read-only ↔ normal)
   /cost               Show token usage and cost
   /compact            Manually compact conversation
+  /goal <condition>   Pursue a goal across turns until an evaluator judges it met
+  /goal               Show the active goal's status
+  /loop [interval] <prompt>  Re-run a prompt on an interval (5m/2h) or self-paced
   /memory             List saved memories
   /skills             List available skills
   /<skill-name>       Invoke a skill (e.g. /commit "fix types")
@@ -156,6 +162,11 @@ async function runRepl(agent: Agent) {
   // Ctrl+C handling
   let sigintCount = 0;
   process.on("SIGINT", () => {
+    // Always signal a running /loop or /goal to stop — during its inter-tick
+    // wait or between-turn evaluation the agent isn't "processing", so the abort
+    // path below wouldn't catch it.
+    agent.stopLoop();
+    agent.stopGoal();
     if (agent.isProcessing) {
       agent.abort();
       console.log("\n  (interrupted)");
@@ -215,6 +226,32 @@ async function runRepl(agent: Agent) {
           await agent.compact();
         } catch (e: any) {
           printError(e.message);
+        }
+        askQuestion();
+        return;
+      }
+      if (input === "/goal" || input.startsWith("/goal ")) {
+        const condition = input.slice("/goal".length).trim();
+        if (!condition) {
+          agent.showGoal();
+          askQuestion();
+          return;
+        }
+        const directive = agent.setGoal(condition);
+        try {
+          await agent.pursueGoal(directive);
+        } catch (e: any) {
+          if (e.name !== "AbortError" && !e.message?.includes("aborted")) printError(e.message);
+        }
+        askQuestion();
+        return;
+      }
+      if (input === "/loop" || input.startsWith("/loop ")) {
+        const rest = input.slice("/loop".length).trim();
+        try {
+          await agent.runLoop(rest);
+        } catch (e: any) {
+          if (e.name !== "AbortError" && !e.message?.includes("aborted")) printError(e.message);
         }
         askQuestion();
         return;

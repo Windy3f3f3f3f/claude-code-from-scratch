@@ -30,6 +30,28 @@ from .memory import (
     format_memories_for_injection,
     MemoryPrefetch,
 )
+from .autonomy import (
+    goal_directive,
+    GOAL_EVALUATOR_SYSTEM,
+    GOAL_TRANSCRIPT_FRAMING,
+    goal_judge_user_message,
+    parse_goal_verdict,
+    GOAL_MAX_ITERATIONS,
+    parse_loop_input,
+    is_daily_wording,
+    OFFER_CLOUD_THRESHOLD_SECONDS,
+    SCHEDULE_WAKEUP_TOOL,
+    clamp_wakeup_delay,
+    dynamic_loop_directive,
+    LOOP_MAX_ITERATIONS,
+    load_auto_mode_rules,
+    build_classifier_system,
+    AUTO_MODE_FAST_PATH_TOOLS,
+    DENIAL_LIMITS,
+    build_classifier_transcript,
+    parse_block_verdict,
+    classifier_user_message,
+)
 from .ui import (
     print_assistant_text,
     print_tool_call,
@@ -46,7 +68,7 @@ from .ui import (
     stop_spinner,
 )
 from .session import save_session
-from .prompt import build_system_prompt, build_static_system_prompt, build_dynamic_system_context, build_user_context_reminder
+from .prompt import build_system_prompt, build_static_system_prompt, build_dynamic_system_context, build_user_context_reminder, load_claude_md
 from .subagent import get_sub_agent_config
 from .mcp_client import McpManager
 
@@ -193,6 +215,23 @@ class Agent:
         self.current_turns = 0
         self.last_api_call_time = 0.0
 
+        # /goal — session-scoped Stop-hook condition, pursued across turns
+        self.active_goal: dict | None = None
+        self.goal_stop = False  # set on interrupt to break out of goal pursuit
+
+        # /loop dynamic mode — set when the model calls schedule_wakeup during a
+        # tick, read (and cleared) by the loop driver after the turn converges.
+        self.pending_wakeup: dict | None = None
+        self.loop_stop = False  # set on interrupt to break out of a running loop
+        # schedule_wakeup is routed to the internal executor only while a dynamic
+        # loop is active, so it can't shadow a same-named tool or be reached out
+        # of band.
+        self.schedule_wakeup_enabled = False
+
+        # Auto Mode — transcript-classifier denial tracking (DENIAL_LIMITS).
+        self.auto_consecutive_denials = 0
+        self.auto_total_denials = 0
+
         # Abort support
         self._aborted = False
         self._current_task: asyncio.Task | None = None
@@ -320,13 +359,16 @@ class Agent:
         return self._current_task is not None and not self._current_task.done()
 
     def _build_side_query(self):
-        """Build a sideQuery callable for memory recall, works with both backends."""
+        """Build a sideQuery callable for memory recall and the Auto Mode
+        classifier, works with both backends. temperature=0 for a deterministic
+        decision — the same input should always yield the same verdict (Claude
+        Code runs the classifier at temperature 0)."""
         if self._anthropic_client:
             client = self._anthropic_client
             model = self.model
             async def _sq(system: str, user_message: str) -> str:
                 resp = await client.messages.create(
-                    model=model, max_tokens=256, system=system,
+                    model=model, max_tokens=256, system=system, temperature=0,
                     messages=[{"role": "user", "content": user_message}],
                 )
                 return "".join(b.text for b in resp.content if b.type == "text")
@@ -336,7 +378,7 @@ class Agent:
             model = self.model
             async def _sq_oai(system: str, user_message: str) -> str:
                 resp = await client.chat.completions.create(
-                    model=model,
+                    model=model, max_tokens=256, temperature=0,
                     messages=[
                         {"role": "system", "content": system},
                         {"role": "user", "content": user_message},
@@ -481,6 +523,364 @@ class Agent:
 
     async def compact(self) -> None:
         await self._compact_conversation()
+
+    # ─── /goal pursuit ────────────────────────────────────────
+    # A prompt-based Stop hook: after each turn a separate evaluator model judges
+    # the condition; not-met feeds its reason into the next turn, met/impossible
+    # stop. See autonomy.py for the (verbatim) evaluator prompt.
+
+    def set_goal(self, condition: str) -> str:
+        """Set the active goal and return the first-turn directive to run."""
+        self.active_goal = {"condition": condition, "iterations": 0, "started_at": time.time(), "last_reason": None}
+        print_info(f'◎ /goal active — Stop hook condition: "{condition}"')
+        return goal_directive(condition)
+
+    def show_goal(self) -> None:
+        """`/goal` with no argument prints the current goal's status."""
+        if not self.active_goal:
+            print_info("No active goal. Set one with /goal <condition>.")
+            return
+        secs = time.time() - self.active_goal["started_at"]
+        last = f"\n  last reason: {self.active_goal['last_reason']}" if self.active_goal["last_reason"] else ""
+        print_info(
+            f"◎ /goal active\n  condition: {self.active_goal['condition']}\n"
+            f"  iterations: {self.active_goal['iterations']}\n  elapsed: {secs:.1f}s{last}"
+        )
+
+    async def pursue_goal(self, directive: str) -> None:
+        """Pursue the active goal: run the directive turn, then loop
+        evaluate → (not met) feed reason back → next turn, until met, impossible,
+        budget/iteration cap, or interrupt."""
+        if not self.active_goal:
+            return
+        self.goal_stop = False
+        try:
+            await self.chat(directive)
+            # Evaluate the turn that just finished *before* any cap or next-turn
+            # decision, so the final turn's output is never left unjudged.
+            while self.active_goal and not self.goal_stop and not self._aborted:
+                verdict = await self._evaluate_goal(self.active_goal["condition"])
+                if verdict["ok"]:
+                    turns = self.active_goal["iterations"] + 1
+                    secs = time.time() - self.active_goal["started_at"]
+                    plural = "" if turns == 1 else "s"
+                    print_info(f"✓ Goal achieved ({turns} turn{plural}, {secs:.1f}s): {verdict['reason']}")
+                    break
+                if verdict.get("impossible"):
+                    print_info(f"Hooks: Prompt hook condition judged impossible: {verdict['reason']}")
+                    break
+
+                # Not met: record and decide whether another turn is allowed.
+                self.active_goal["iterations"] += 1
+                self.active_goal["last_reason"] = verdict["reason"]
+                print_info(f"Hooks: Prompt hook condition was not met: {verdict['reason']}")
+
+                budget = self._check_budget()
+                if budget["exceeded"]:
+                    print_info(f"Goal stopped: {budget['reason']}")
+                    break
+                # Hard ceiling regardless of --max-turns: --max-turns only counts
+                # tool-executing turns (_check_budget), so a no-tool goal loop
+                # needs an unconditional backstop of its own.
+                if self.active_goal["iterations"] >= GOAL_MAX_ITERATIONS:
+                    print_info(f"Goal stopped: reached {GOAL_MAX_ITERATIONS} iterations without meeting the condition.")
+                    break
+                if self.goal_stop or self._aborted:
+                    break
+
+                await self.chat(
+                    f"Hooks: Prompt hook condition was not met: {verdict['reason']}\n\nKeep working toward the goal."
+                )
+            if self.goal_stop or self._aborted:
+                print_info("Goal pursuit interrupted.")
+        finally:
+            # Clear on any exit (met / impossible / capped / interrupted) so a
+            # stale goal never lingers. Real Claude Code keeps it session-scoped
+            # and resumable; we don't implement resume.
+            self.active_goal = None
+
+    async def _evaluate_goal(self, condition: str) -> dict:
+        """One evaluator pass over the just-finished turn's transcript. The
+        transcript is sent as its own assistant message (framed by a preceding
+        user message as data-to-judge), so a crafted turn can't smuggle fake
+        user/judge text into the evaluator's context — real Claude Code likewise
+        sends the turn as a separate transcript message, not inlined."""
+        transcript = self._extract_last_assistant_text()
+        messages = [
+            {"role": "user", "content": GOAL_TRANSCRIPT_FRAMING},
+            {"role": "assistant", "content": transcript or "(no assistant output)"},
+            {"role": "user", "content": goal_judge_user_message(condition)},
+        ]
+        try:
+            raw = await self._run_evaluator_query(GOAL_EVALUATOR_SYSTEM, messages)
+            return parse_goal_verdict(raw)
+        except Exception as e:
+            # Evaluator error → treat as not-met (never accidentally clears goal).
+            return {"ok": False, "reason": f"evaluator error: {e}", "impossible": False}
+
+    async def _run_evaluator_query(self, system: str, messages: list) -> str:
+        """Send a role-separated evaluator query on whichever backend is
+        configured and return the model's text. Like _build_side_query but takes
+        a full messages array (that one is single-user-message, for memory
+        recall)."""
+        if self._anthropic_client:
+            resp = await self._anthropic_client.messages.create(
+                model=self.model, max_tokens=512, system=system, temperature=0, messages=messages,
+            )
+            return "".join(b.text for b in resp.content if b.type == "text")
+        if self._openai_client:
+            resp = await self._openai_client.chat.completions.create(
+                model=self.model, max_tokens=512, temperature=0,
+                messages=[{"role": "system", "content": system}, *messages],
+            )
+            return resp.choices[0].message.content or "" if resp.choices else ""
+        raise RuntimeError("no evaluator model available")
+
+    def _extract_last_assistant_text(self) -> str:
+        """The text of the most recent assistant turn, for the evaluator to
+        judge. Transcript-only: the action under judgement is the latest turn."""
+        if self.use_openai:
+            for m in reversed(self._openai_messages):
+                if m.get("role") == "assistant" and isinstance(m.get("content"), str):
+                    return m["content"]
+            return ""
+        for m in reversed(self._anthropic_messages):
+            if m.get("role") != "assistant":
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+        return ""
+
+    # ─── /loop — recurring or self-paced prompt ───────────────
+    # Unlike /goal (a stop-hook gate), /loop actively reschedules itself: a fixed
+    # interval, or — with no interval — a pace the main model picks via the
+    # schedule_wakeup tool. See autonomy.py for the parser and tool schema.
+
+    async def run_loop(self, raw_input: str) -> None:
+        """Entry point for the /loop command. Parses the input, then drives the
+        matching mode. Returns without looping if the input is malformed."""
+        spec = parse_loop_input(raw_input)
+        if "error" in spec:
+            print_info(spec["error"])
+            return
+        # Offer-cloud decision point (interval >=60min or daily wording). Real
+        # Claude Code asks whether to convert to a persistent cloud schedule that
+        # survives the session; this teaching CLI has no cloud, so we only
+        # surface it.
+        wants_cloud = (
+            (spec["mode"] == "interval" and spec["interval_seconds"] >= OFFER_CLOUD_THRESHOLD_SECONDS)
+            or is_daily_wording(raw_input)
+        )
+        if wants_cloud:
+            print_info(
+                "(Real Claude Code would offer to convert this to a persistent cloud schedule "
+                "that keeps running after the session ends. This teaching build has no cloud "
+                "backend — continuing in-session.)"
+            )
+
+        self.loop_stop = False
+        try:
+            if spec["mode"] == "interval":
+                await self._run_loop_interval(spec)
+            else:
+                await self._run_loop_dynamic(spec)
+        except asyncio.CancelledError:
+            print_info("Loop interrupted.")
+
+    async def _run_loop_interval(self, spec: dict) -> None:
+        """Interval mode: re-run the prompt every N seconds until interrupted or
+        the iteration cap. Corresponds to Claude Code's in-session CronCreate
+        path (session-only, not persisted). We use a plain timer in place of the
+        cron engine + KAIROS daemon."""
+        print_info(
+            f"⟳ /loop scheduled every {spec['interval_label']} (session-only, not persisted — "
+            "dies when this process exits). Ctrl+C to stop."
+        )
+        iterations = 0
+        while not self.loop_stop and not self._aborted:
+            iterations += 1
+            print_info(f"⟳ loop tick {iterations}")
+            await self.chat(spec["prompt"])
+
+            budget = self._check_budget()
+            if budget["exceeded"]:
+                print_info(f"Loop stopped: {budget['reason']}")
+                break
+            # --max-turns also bounds loop ticks: _check_budget's turn counter
+            # only increments on tool-executing turns, so a plain-text loop would
+            # never hit it — treat --max-turns as a tick limit here too.
+            if self.max_turns is not None and iterations >= self.max_turns:
+                print_info(f"Loop stopped: tick limit reached ({iterations} >= {self.max_turns}).")
+                break
+            if iterations >= LOOP_MAX_ITERATIONS:
+                print_info(f"Loop stopped: reached {LOOP_MAX_ITERATIONS} ticks.")
+                break
+            interrupted = await self._interruptible_sleep(spec["interval_seconds"])
+            if interrupted:
+                print_info("Loop stopped.")
+                break
+
+    async def _run_loop_dynamic(self, spec: dict) -> None:
+        """Dynamic mode: run the tick, then let the main model self-pace via
+        schedule_wakeup. If it scheduled a wakeup, wait the (clamped) delay and
+        run again with the prompt it passed back; if it didn't, the loop has
+        converged. Faithful to "dynamic pacing is decided by the main model, no
+        separate evaluator." schedule_wakeup is exposed only for the loop."""
+        print_info(
+            "⟳ /loop dynamic (self-paced) — the model schedules its own next run, or ends the "
+            "loop. Ctrl+C to stop."
+        )
+        had_tool = any(t["name"] == "schedule_wakeup" for t in self.tools)
+        if not had_tool:
+            self.tools = self.tools + [SCHEDULE_WAKEUP_TOOL]
+        self.schedule_wakeup_enabled = True
+        prompt = spec["prompt"]
+        iterations = 0
+        try:
+            while not self.loop_stop and not self._aborted:
+                iterations += 1
+                self.pending_wakeup = None
+                await self.chat(dynamic_loop_directive(prompt))
+
+                if not self.pending_wakeup:
+                    plural = "" if iterations == 1 else "s"
+                    print_info(f"⟳ Loop converged after {iterations} tick{plural} (model scheduled no wakeup).")
+                    break
+                budget = self._check_budget()
+                if budget["exceeded"]:
+                    print_info(f"Loop stopped: {budget['reason']}")
+                    break
+                if self.max_turns is not None and iterations >= self.max_turns:
+                    print_info(f"Loop stopped: tick limit reached ({iterations} >= {self.max_turns}).")
+                    break
+                if iterations >= LOOP_MAX_ITERATIONS:
+                    print_info(f"Loop stopped: reached {LOOP_MAX_ITERATIONS} ticks.")
+                    break
+                delay = self.pending_wakeup["delay_seconds"]
+                print_info(f"⟳ next run in {delay}s — {self.pending_wakeup['reason']}")
+                prompt = self.pending_wakeup["prompt"] or prompt
+                interrupted = await self._interruptible_sleep(delay)
+                if interrupted:
+                    print_info("Loop stopped.")
+                    break
+        finally:
+            # Remove schedule_wakeup so it isn't exposed outside the dynamic loop.
+            if not had_tool:
+                self.tools = [t for t in self.tools if t["name"] != "schedule_wakeup"]
+            self.schedule_wakeup_enabled = False
+            self.pending_wakeup = None
+
+    def _execute_schedule_wakeup(self, inp: dict) -> str:
+        """schedule_wakeup executor: record the requested wakeup for the loop
+        driver. Delay is clamped to [60, 3600]; the driver reads pending_wakeup
+        after the turn converges."""
+        delay = clamp_wakeup_delay(inp.get("delaySeconds"))
+        reason = inp.get("reason") if isinstance(inp.get("reason"), str) else ""
+        prompt = inp.get("prompt") if isinstance(inp.get("prompt"), str) else ""
+        self.pending_wakeup = {"delay_seconds": delay, "reason": reason, "prompt": prompt}
+        return f"Wakeup scheduled in {delay}s. The loop will resume then; end your turn now."
+
+    async def _interruptible_sleep(self, seconds: float) -> bool:
+        """Sleep that resolves early (returning True) if the loop is stopped or
+        the turn is aborted. Avoids blocking on a long interval past a Ctrl+C."""
+        import time as _time
+        start = _time.time()
+        while _time.time() - start < seconds:
+            if self.loop_stop or self._aborted:
+                return True
+            await asyncio.sleep(min(0.2, seconds))
+        return False
+
+    def stop_loop(self) -> None:
+        """Stop a running /loop (called from the REPL's interrupt handler)."""
+        self.loop_stop = True
+
+    def stop_goal(self) -> None:
+        """Stop a running /goal pursuit (called from the REPL's interrupt
+        handler). Takes effect at the next turn boundary — an in-flight turn is
+        aborted separately via abort()."""
+        self.goal_stop = True
+
+    # ─── Auto Mode — transcript-classifier permission gate ────
+    # In `auto` mode the classifier replaces the human confirm prompt: deny rules
+    # still hard-block, read-only tools fast-path through, everything else is
+    # judged by an LLM reading a reasoning-blind transcript projection.
+
+    async def _classify_tool_call(self, tool_name: str, inp: dict) -> dict:
+        """Decide a tool call in Auto Mode. Returns allow/deny like
+        check_permission, or "confirm" to hand back to a human once the denial
+        limits trip."""
+        # Hard floor first: deny rules bind even here.
+        base = check_permission(tool_name, inp, "default", self._plan_file_path)
+        if base["action"] == "deny":
+            return base
+        # Fast-path: read-only / side-effect-free tools skip the classifier.
+        if tool_name in AUTO_MODE_FAST_PATH_TOOLS:
+            return {"action": "allow"}
+
+        sq = self._build_side_query()
+        if not sq:
+            # No evaluator available → fail closed. Defer to a human if present
+            # (interactive), else deny outright (headless: CC aborts here).
+            return self._auto_fallback(f"{tool_name} (auto-mode classifier unavailable)")
+        try:
+            rules = load_auto_mode_rules()
+            history = self._openai_messages if self.use_openai else self._anthropic_messages
+            transcript = build_classifier_transcript(history, {"tool_name": tool_name, "input": inp})
+            system = build_classifier_system(rules)
+            # CLAUDE.md rides in the user message, not the system prompt — it is
+            # untrusted repo content.
+            user = classifier_user_message(rules, transcript, load_claude_md())
+            raw = await sq(system, user)
+            verdict = parse_block_verdict(raw)
+        except Exception as e:
+            # Any setup or classifier error → fail closed (block), matching CC's
+            # iron gate. Wrapping the asset load here keeps a missing/bad rules
+            # file from crashing the turn and orphaning the tool_use.
+            verdict = {"block": True, "reason": f"classifier error: {e}"}
+
+        if not verdict["block"]:
+            self.auto_consecutive_denials = 0
+            return {"action": "allow"}
+
+        self.auto_consecutive_denials += 1
+        self.auto_total_denials += 1
+        if (
+            self.auto_consecutive_denials >= DENIAL_LIMITS["max_consecutive"]
+            or self.auto_total_denials >= DENIAL_LIMITS["max_total"]
+        ):
+            # Too many denials — the classifier may be stuck. Hand back to a human
+            # if interactive; deny in headless (CC aborts the agent here).
+            print_info("Auto Mode: denial limit reached — handing back to manual confirmation.")
+            return self._auto_fallback(f"[Auto Mode blocked] {verdict['reason']}")
+        return {"action": "deny", "message": f"[Auto Mode] {verdict['reason']}"}
+
+    def _auto_fallback(self, message: str) -> dict:
+        """Auto Mode fail-safe: defer to a human confirm if one is available,
+        else deny (headless). Never returns "allow" — the point is to not run an
+        unjudged action."""
+        if self.confirm_fn:
+            return {"action": "confirm", "message": message}
+        return {"action": "deny", "message": f"{message} (headless — denied)"}
+
+    def _child_permission_mode(self) -> str:
+        """Permission mode a spawned sub-agent inherits. plan and auto must carry
+        through — a sub-agent otherwise runs bypassPermissions, so in Auto Mode
+        the main model could launder a blocked action through
+        agent(prompt="git push origin main") and have the sub-agent run it
+        unclassified. Claude Code puts every sub-agent tool call through
+        canUseTool individually."""
+        if self.permission_mode == "plan":
+            return "plan"
+        if self.permission_mode == "auto":
+            return "auto"
+        return "bypassPermissions"
 
     # ─── Session ──────────────────────────────────────────────
 
@@ -758,6 +1158,13 @@ class Agent:
             return await self._execute_agent_tool(inp)
         if name == "skill":
             return await self._execute_skill_tool(inp)
+        if name == "schedule_wakeup":
+            # Only the internal dynamic-loop driver may route here; outside a
+            # dynamic loop the tool isn't exposed, and this guard keeps a stray
+            # call (or a same-named external tool) from reaching the executor.
+            if not self.schedule_wakeup_enabled:
+                return "schedule_wakeup is only available during /loop dynamic mode."
+            return self._execute_schedule_wakeup(inp)
         # Route MCP tool calls to the MCP manager
         if self._mcp_manager.is_mcp_tool(name):
             return await self._mcp_manager.call_tool(name, inp)
@@ -772,11 +1179,16 @@ class Agent:
             return f"Unknown skill: {inp.get('skill_name', '')}"
 
         if result["context"] == "fork":
-            tools = (
-                [t for t in self.tools if t["name"] in result["allowed_tools"]]
-                if result.get("allowed_tools")
-                else [t for t in self.tools if t["name"] != "agent"]
-            )
+            # Never pass schedule_wakeup down — it's a driver-internal tool scoped
+            # to this agent's dynamic loop, not something a forked skill inherits.
+            tools = [
+                t for t in (
+                    [t for t in self.tools if t["name"] in result["allowed_tools"]]
+                    if result.get("allowed_tools")
+                    else [t for t in self.tools if t["name"] != "agent"]
+                )
+                if t["name"] != "schedule_wakeup"
+            ]
             print_sub_agent_start("skill-fork", inp.get("skill_name", ""))
             sub_agent = Agent(
                 model=self.model,
@@ -784,7 +1196,7 @@ class Agent:
                 custom_system_prompt=result["prompt"],
                 custom_tools=tools,
                 is_sub_agent=True,
-                permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
+                permission_mode=self._child_permission_mode(),
             )
             try:
                 sub_result = await sub_agent.run_once(inp.get("args") or "Execute this skill task.")
@@ -928,7 +1340,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             custom_system_prompt=config["system_prompt"],
             custom_tools=config["tools"],
             is_sub_agent=True,
-            permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
+            permission_mode=self._child_permission_mode(),
         )
 
         try:
@@ -1046,6 +1458,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             early_executions: dict[str, asyncio.Task] = {}
 
             def _on_tool_block(block: dict):
+                # In Auto Mode, only fast-path (classifier-exempt) tools may start
+                # early — otherwise a concurrency-safe-but-classified tool (e.g.
+                # web_fetch) would run before the classifier ever sees it.
+                if self.permission_mode == "auto" and block["name"] not in AUTO_MODE_FAST_PATH_TOOLS:
+                    return
                 if block["name"] in CONCURRENCY_SAFE_TOOLS:
                     perm = check_permission(block["name"], block["input"], self.permission_mode, self._plan_file_path)
                     if perm["action"] == "allow":
@@ -1121,18 +1538,28 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                     tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": res})
                     continue
 
-                # Permission check for tools not started early
-                perm = check_permission(tu.name, inp, self.permission_mode, self._plan_file_path)
+                # Permission check for tools not started early. Auto Mode routes
+                # through the transcript classifier; other modes use static rules.
+                if self.permission_mode == "auto":
+                    perm = await self._classify_tool_call(tu.name, inp)
+                else:
+                    perm = check_permission(tu.name, inp, self.permission_mode, self._plan_file_path)
                 if perm["action"] == "deny":
                     print_info(f"Denied: {perm.get('message', '')}")
                     tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": f"Action denied: {perm.get('message', '')}"})
                     continue
-                if perm["action"] == "confirm" and perm.get("message") and perm["message"] not in self._confirmed_paths:
-                    confirmed = await self._confirm_dangerous(perm["message"])
-                    if not confirmed:
-                        tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "User denied this action."})
-                        continue
-                    self._confirmed_paths.add(perm["message"])
+                if perm["action"] == "confirm" and perm.get("message"):
+                    # Auto Mode confirms carry a reason, not a path — never cache
+                    # them, or one approval would whitelist every later action
+                    # with the same reason.
+                    cacheable = self.permission_mode != "auto"
+                    if not cacheable or perm["message"] not in self._confirmed_paths:
+                        confirmed = await self._confirm_dangerous(perm["message"])
+                        if not confirmed:
+                            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "User denied this action."})
+                            continue
+                        if cacheable:
+                            self._confirmed_paths.add(perm["message"])
 
                 raw = await self._execute_tool_call(tu.name, inp)
                 res = self._persist_large_result(tu.name, raw)
@@ -1327,17 +1754,26 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
                 print_tool_call(fn_name, inp)
 
-                perm = check_permission(fn_name, inp, self.permission_mode, self._plan_file_path)
+                if self.permission_mode == "auto":
+                    perm = await self._classify_tool_call(fn_name, inp)
+                else:
+                    perm = check_permission(fn_name, inp, self.permission_mode, self._plan_file_path)
                 if perm["action"] == "deny":
                     print_info(f"Denied: {perm.get('message', '')}")
                     oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False, "result": f"Action denied: {perm.get('message', '')}"})
                     continue
-                if perm["action"] == "confirm" and perm.get("message") and perm["message"] not in self._confirmed_paths:
-                    confirmed = await self._confirm_dangerous(perm["message"])
-                    if not confirmed:
-                        oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False, "result": "User denied this action."})
-                        continue
-                    self._confirmed_paths.add(perm["message"])
+                if perm["action"] == "confirm" and perm.get("message"):
+                    # Auto Mode confirms carry a reason, not a path — never cache
+                    # them, or one approval would whitelist every later action
+                    # with the same reason.
+                    cacheable = self.permission_mode != "auto"
+                    if not cacheable or perm["message"] not in self._confirmed_paths:
+                        confirmed = await self._confirm_dangerous(perm["message"])
+                        if not confirmed:
+                            oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False, "result": "User denied this action."})
+                            continue
+                        if cacheable:
+                            self._confirmed_paths.add(perm["message"])
                 oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": True})
 
             # Phase 2: Group & execute (parallel for consecutive safe tools)

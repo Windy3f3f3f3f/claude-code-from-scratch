@@ -18,13 +18,22 @@ import {
   stopSpinner,
 } from "./ui.js";
 import { saveSession } from "./session.js";
-import { buildSystemPrompt, buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
+import { buildSystemPrompt, buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder, loadClaudeMd } from "./prompt.js";
 import { getSubAgentConfig, type SubAgentType } from "./subagent.js";
 import {
   startMemoryPrefetch, formatMemoriesForInjection,
   type MemoryPrefetch, type RelevantMemory, type SideQueryFn,
 } from "./memory.js";
 import { McpManager } from "./mcp.js";
+import {
+  goalDirective, GOAL_EVALUATOR_SYSTEM, GOAL_TRANSCRIPT_FRAMING, goalJudgeUserMessage,
+  parseGoalVerdict, GOAL_MAX_ITERATIONS, type GoalVerdict,
+  parseLoopInput, isDailyWording, OFFER_CLOUD_THRESHOLD_SECONDS,
+  SCHEDULE_WAKEUP_TOOL, clampWakeupDelay, dynamicLoopDirective, LOOP_MAX_ITERATIONS,
+  type LoopSpec,
+  loadAutoModeRules, buildClassifierSystem, AUTO_MODE_FAST_PATH_TOOLS, DENIAL_LIMITS,
+  buildClassifierTranscript, parseBlockVerdict, classifierUserMessage,
+} from "./autonomy.js";
 import * as readline from "readline";
 import { randomUUID } from "crypto";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs";
@@ -174,6 +183,28 @@ export class Agent {
   private maxCostUsd?: number;
   private maxTurns?: number;
   private currentTurns = 0;
+
+  // /goal — session-scoped Stop-hook condition, pursued across turns
+  private activeGoal: {
+    condition: string;
+    iterations: number;
+    startedAt: number;
+    lastReason?: string;
+  } | null = null;
+
+  private goalStop = false; // set on interrupt to break out of goal pursuit
+
+  // /loop dynamic mode — set when the model calls schedule_wakeup during a tick,
+  // read (and cleared) by the loop driver after the turn converges.
+  private pendingWakeup: { delaySeconds: number; reason: string; prompt: string } | null = null;
+  private loopStop = false; // set on interrupt to break out of a running loop
+  // schedule_wakeup is routed to the internal executor only while a dynamic loop
+  // is active, so it can't shadow a same-named tool or be reached out of band.
+  private scheduleWakeupEnabled = false;
+
+  // Auto Mode — transcript-classifier denial tracking (auto_mode DENIAL_LIMITS).
+  private autoConsecutiveDenials = 0;
+  private autoTotalDenials = 0;
 
   // Multi-tier compression state
   private lastApiCallTime = 0;
@@ -330,14 +361,17 @@ export class Agent {
     return "enabled";
   }
 
-  /** Build a sideQuery function for memory recall, works with both backends. */
+  /** Build a sideQuery function for memory recall and the Auto Mode classifier,
+   *  works with both backends. temperature:0 for a deterministic decision — the
+   *  same input should always yield the same verdict (Claude Code runs the
+   *  classifier at temperature 0). */
   private buildSideQuery(): SideQueryFn | null {
     if (this.anthropicClient) {
       const client = this.anthropicClient;
       const model = this.model;
       return async (system, userMessage, signal) => {
         const resp = await client.messages.create({
-          model, max_tokens: 256, system,
+          model, max_tokens: 256, system, temperature: 0,
           messages: [{ role: "user", content: userMessage }],
         }, { signal });
         return resp.content
@@ -350,7 +384,7 @@ export class Agent {
       const model = this.model;
       return async (system, userMessage, _signal) => {
         const resp = await client.chat.completions.create({
-          model, max_tokens: 256,
+          model, max_tokens: 256, temperature: 0,
           messages: [
             { role: "system", content: system },
             { role: "user", content: userMessage },
@@ -530,6 +564,387 @@ export class Agent {
 
   async compact() {
     await this.compactConversation();
+  }
+
+  // ─── /goal pursuit ──────────────────────────────────────────
+  // A prompt-based Stop hook: after each turn a separate evaluator model judges
+  // the condition; not-met feeds its reason into the next turn, met/impossible
+  // stop. See autonomy.ts for the (verbatim) evaluator prompt.
+
+  /** Set the active goal and return the first-turn directive to run. */
+  setGoal(condition: string): string {
+    this.activeGoal = { condition, iterations: 0, startedAt: Date.now() };
+    printInfo(`◎ /goal active — Stop hook condition: "${condition}"`);
+    return goalDirective(condition);
+  }
+
+  /** `/goal` with no argument prints the current goal's status. */
+  showGoal(): void {
+    if (!this.activeGoal) {
+      printInfo("No active goal. Set one with /goal <condition>.");
+      return;
+    }
+    const secs = ((Date.now() - this.activeGoal.startedAt) / 1000).toFixed(1);
+    const last = this.activeGoal.lastReason ? `\n  last reason: ${this.activeGoal.lastReason}` : "";
+    printInfo(
+      `◎ /goal active\n  condition: ${this.activeGoal.condition}\n  iterations: ${this.activeGoal.iterations}\n  elapsed: ${secs}s${last}`
+    );
+  }
+
+  /** Pursue the active goal: run the directive turn, then loop
+   *  evaluate → (not met) feed reason back → next turn, until met, impossible,
+   *  budget/iteration cap, or interrupt. */
+  async pursueGoal(directive: string): Promise<void> {
+    if (!this.activeGoal) return;
+    this.goalStop = false;
+    try {
+      await this.chat(directive);
+      // Evaluate the turn that just finished *before* any cap or next-turn
+      // decision, so the final turn's output is never left unjudged.
+      while (this.activeGoal && !this.goalStop) {
+        const verdict = await this.evaluateGoal(this.activeGoal.condition);
+        if (verdict.ok) {
+          const turns = this.activeGoal.iterations + 1;
+          const secs = ((Date.now() - this.activeGoal.startedAt) / 1000).toFixed(1);
+          printInfo(`✓ Goal achieved (${turns} turn${turns === 1 ? "" : "s"}, ${secs}s): ${verdict.reason}`);
+          break;
+        }
+        if (verdict.impossible) {
+          printInfo(`Hooks: Prompt hook condition judged impossible: ${verdict.reason}`);
+          break;
+        }
+
+        // Not met: record and decide whether another turn is allowed.
+        this.activeGoal.iterations++;
+        this.activeGoal.lastReason = verdict.reason;
+        printInfo(`Hooks: Prompt hook condition was not met: ${verdict.reason}`);
+
+        const budget = this.checkBudget();
+        if (budget.exceeded) { printInfo(`Goal stopped: ${budget.reason}`); break; }
+        // Hard ceiling regardless of --max-turns: --max-turns only counts
+        // tool-executing turns (checkBudget), so a no-tool goal loop needs an
+        // unconditional backstop of its own.
+        if (this.activeGoal.iterations >= GOAL_MAX_ITERATIONS) {
+          printInfo(`Goal stopped: reached ${GOAL_MAX_ITERATIONS} iterations without meeting the condition.`);
+          break;
+        }
+        if (this.goalStop) break;
+
+        await this.chat(
+          `Hooks: Prompt hook condition was not met: ${verdict.reason}\n\nKeep working toward the goal.`
+        );
+      }
+      if (this.goalStop) printInfo("Goal pursuit interrupted.");
+    } catch (e: any) {
+      if (e?.name !== "AbortError" && !e?.message?.includes("aborted")) throw e;
+      // Interrupted (Ctrl+C) mid-turn: stop pursuing the goal.
+      printInfo("Goal pursuit interrupted.");
+    } finally {
+      // Clear on any exit (met / impossible / capped / interrupted) so a stale
+      // goal never lingers. Real Claude Code keeps it session-scoped and
+      // resumable; we don't implement resume.
+      this.activeGoal = null;
+    }
+  }
+
+  /** One evaluator pass over the just-finished turn's transcript. The transcript
+   *  is sent as its own assistant message (framed by a preceding user message
+   *  as data-to-judge), so a crafted turn can't smuggle fake user/judge text
+   *  into the evaluator's context — real Claude Code likewise sends the turn as
+   *  a separate transcript message, not inlined into the judge prompt. */
+  private async evaluateGoal(condition: string): Promise<GoalVerdict> {
+    const transcript = this.extractLastAssistantText();
+    const messages = [
+      { role: "user" as const, content: GOAL_TRANSCRIPT_FRAMING },
+      { role: "assistant" as const, content: transcript || "(no assistant output)" },
+      { role: "user" as const, content: goalJudgeUserMessage(condition) },
+    ];
+    try {
+      const raw = await this.runEvaluatorQuery(GOAL_EVALUATOR_SYSTEM, messages);
+      return parseGoalVerdict(raw);
+    } catch (e: any) {
+      // Evaluator error → treat as not-met (never accidentally clears the goal).
+      return { ok: false, reason: `evaluator error: ${e?.message ?? e}` };
+    }
+  }
+
+  /** Send a role-separated evaluator query on whichever backend is configured
+   *  and return the model's text. Like buildSideQuery but takes a full messages
+   *  array (buildSideQuery is single-user-message, for memory recall). */
+  private async runEvaluatorQuery(
+    system: string,
+    messages: { role: "user" | "assistant"; content: string }[],
+  ): Promise<string> {
+    if (this.anthropicClient) {
+      const resp = await this.anthropicClient.messages.create({
+        model: this.model, max_tokens: 512, system, temperature: 0, messages,
+      });
+      return resp.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text).join("");
+    }
+    if (this.openaiClient) {
+      const resp = await this.openaiClient.chat.completions.create({
+        model: this.model, max_tokens: 512, temperature: 0,
+        messages: [{ role: "system", content: system }, ...messages],
+      });
+      return resp.choices?.[0]?.message?.content || "";
+    }
+    throw new Error("no evaluator model available");
+  }
+
+  /** The text of the most recent assistant turn, for the evaluator to judge.
+   *  Transcript-only: real Claude Code feeds the whole transcript but the
+   *  action under judgement is the latest turn. */
+  private extractLastAssistantText(): string {
+    if (this.useOpenAI) {
+      for (let i = this.openaiMessages.length - 1; i >= 0; i--) {
+        const m: any = this.openaiMessages[i];
+        if (m.role === "assistant" && typeof m.content === "string") return m.content;
+      }
+      return "";
+    }
+    for (let i = this.anthropicMessages.length - 1; i >= 0; i--) {
+      const m: any = this.anthropicMessages[i];
+      if (m.role !== "assistant") continue;
+      if (typeof m.content === "string") return m.content;
+      if (Array.isArray(m.content)) {
+        return m.content
+          .filter((b: any) => b.type === "text")
+          .map((b: any) => b.text)
+          .join("");
+      }
+    }
+    return "";
+  }
+
+  // ─── /loop — recurring or self-paced prompt ─────────────────
+  // Unlike /goal (a stop-hook gate), /loop actively reschedules itself: a fixed
+  // interval, or — with no interval — a pace the main model picks via the
+  // schedule_wakeup tool. See autonomy.ts for the parser and tool schema.
+
+  /** Entry point for the /loop command. Parses the input, then drives the
+   *  matching mode. Returns without looping if the input is malformed. */
+  async runLoop(rawInput: string): Promise<void> {
+    const spec = parseLoopInput(rawInput);
+    if ("error" in spec) {
+      printInfo(spec.error);
+      return;
+    }
+    // Offer-cloud decision point (interval ≥60min or daily wording). Real Claude
+    // Code asks whether to convert to a persistent cloud schedule that survives
+    // the session; this teaching CLI has no cloud, so we only surface it.
+    const wantsCloud =
+      (spec.mode === "interval" && spec.intervalSeconds! >= OFFER_CLOUD_THRESHOLD_SECONDS) ||
+      isDailyWording(rawInput);
+    if (wantsCloud) {
+      printInfo("(Real Claude Code would offer to convert this to a persistent cloud schedule that keeps running after the session ends. This teaching build has no cloud backend — continuing in-session.)");
+    }
+
+    this.loopStop = false;
+    try {
+      if (spec.mode === "interval") {
+        await this.runLoopInterval(spec);
+      } else {
+        await this.runLoopDynamic(spec);
+      }
+    } catch (e: any) {
+      if (e?.name !== "AbortError" && !e?.message?.includes("aborted")) throw e;
+      printInfo("Loop interrupted.");
+    }
+  }
+
+  /** Interval mode: re-run the prompt every N seconds until interrupted or the
+   *  iteration cap. Corresponds to Claude Code's in-session CronCreate path
+   *  (session-only, not persisted). We use a plain timer in place of the cron
+   *  engine + KAIROS daemon. */
+  private async runLoopInterval(spec: LoopSpec): Promise<void> {
+    printInfo(`⟳ /loop scheduled every ${spec.intervalLabel} (session-only, not persisted — dies when this process exits). Ctrl+C to stop.`);
+    let iterations = 0;
+    while (!this.loopStop && !this.abortController?.signal.aborted) {
+      iterations++;
+      printInfo(`⟳ loop tick ${iterations}`);
+      await this.chat(spec.prompt);
+
+      const budget = this.checkBudget();
+      if (budget.exceeded) { printInfo(`Loop stopped: ${budget.reason}`); break; }
+      // --max-turns also bounds loop ticks: checkBudget's turn counter only
+      // increments on tool-executing turns, so a plain-text loop would never
+      // hit it — treat --max-turns as a tick limit here too.
+      if (this.maxTurns !== undefined && iterations >= this.maxTurns) {
+        printInfo(`Loop stopped: tick limit reached (${iterations} >= ${this.maxTurns}).`);
+        break;
+      }
+      if (iterations >= LOOP_MAX_ITERATIONS) {
+        printInfo(`Loop stopped: reached ${LOOP_MAX_ITERATIONS} ticks.`);
+        break;
+      }
+      const interrupted = await this.interruptibleSleep(spec.intervalSeconds! * 1000);
+      if (interrupted) { printInfo("Loop stopped."); break; }
+    }
+  }
+
+  /** Dynamic mode: run the tick, then let the main model self-pace via
+   *  schedule_wakeup. If it scheduled a wakeup, wait the (clamped) delay and run
+   *  again with the prompt it passed back; if it didn't, the loop has converged.
+   *  Faithful to "dynamic pacing is decided by the main model, no separate
+   *  evaluator." schedule_wakeup is exposed only for the duration of the loop. */
+  private async runLoopDynamic(spec: LoopSpec): Promise<void> {
+    printInfo("⟳ /loop dynamic (self-paced) — the model schedules its own next run, or ends the loop. Ctrl+C to stop.");
+    const hadTool = this.tools.some(t => t.name === "schedule_wakeup");
+    if (!hadTool) this.tools = [...this.tools, SCHEDULE_WAKEUP_TOOL as ToolDef];
+    this.scheduleWakeupEnabled = true;
+    let prompt = spec.prompt;
+    let iterations = 0;
+    try {
+      while (!this.loopStop && !this.abortController?.signal.aborted) {
+        iterations++;
+        this.pendingWakeup = null;
+        await this.chat(dynamicLoopDirective(prompt));
+
+        if (!this.pendingWakeup) {
+          printInfo(`⟳ Loop converged after ${iterations} tick${iterations === 1 ? "" : "s"} (model scheduled no wakeup).`);
+          break;
+        }
+        const budget = this.checkBudget();
+        if (budget.exceeded) { printInfo(`Loop stopped: ${budget.reason}`); break; }
+        if (this.maxTurns !== undefined && iterations >= this.maxTurns) {
+          printInfo(`Loop stopped: tick limit reached (${iterations} >= ${this.maxTurns}).`);
+          break;
+        }
+        if (iterations >= LOOP_MAX_ITERATIONS) {
+          printInfo(`Loop stopped: reached ${LOOP_MAX_ITERATIONS} ticks.`);
+          break;
+        }
+        const { delaySeconds, reason, prompt: nextPrompt } = this.pendingWakeup;
+        printInfo(`⟳ next run in ${delaySeconds}s — ${reason}`);
+        prompt = nextPrompt || prompt;
+        const interrupted = await this.interruptibleSleep(delaySeconds * 1000);
+        if (interrupted) { printInfo("Loop stopped."); break; }
+      }
+    } finally {
+      // Remove schedule_wakeup so it isn't exposed outside the dynamic loop.
+      if (!hadTool) this.tools = this.tools.filter(t => t.name !== "schedule_wakeup");
+      this.scheduleWakeupEnabled = false;
+      this.pendingWakeup = null;
+    }
+  }
+
+  /** schedule_wakeup executor: record the requested wakeup for the loop driver.
+   *  Delay is clamped to [60, 3600]; the driver reads pendingWakeup after the
+   *  turn converges. */
+  private executeScheduleWakeup(input: Record<string, any>): string {
+    const delaySeconds = clampWakeupDelay(Number(input.delaySeconds));
+    const reason = typeof input.reason === "string" ? input.reason : "";
+    const prompt = typeof input.prompt === "string" ? input.prompt : "";
+    this.pendingWakeup = { delaySeconds, reason, prompt };
+    return `Wakeup scheduled in ${delaySeconds}s. The loop will resume then; end your turn now.`;
+  }
+
+  /** Sleep that resolves early (returning true) if the loop is stopped or the
+   *  turn is aborted. Avoids blocking on a long interval past a Ctrl+C. */
+  private interruptibleSleep(ms: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        if (this.loopStop || this.abortController?.signal.aborted) return resolve(true);
+        if (Date.now() - start >= ms) return resolve(false);
+        setTimeout(tick, Math.min(200, ms));
+      };
+      tick();
+    });
+  }
+
+  /** Stop a running /loop (called from the REPL's interrupt handler). */
+  stopLoop(): void {
+    this.loopStop = true;
+  }
+
+  /** Stop a running /goal pursuit (called from the REPL's interrupt handler).
+   *  Takes effect at the next turn boundary — an in-flight turn is aborted
+   *  separately via abort(). */
+  stopGoal(): void {
+    this.goalStop = true;
+  }
+
+  // ─── Auto Mode — transcript-classifier permission gate ──────
+  // In `auto` mode the classifier replaces the human confirm prompt: deny rules
+  // still hard-block, read-only tools fast-path through, everything else is
+  // judged by an LLM reading a reasoning-blind transcript projection.
+
+  /** Decide a tool call in Auto Mode. Returns allow/deny like checkPermission,
+   *  or "confirm" to hand back to a human once the denial limits trip. */
+  private async classifyToolCall(
+    toolName: string,
+    input: Record<string, any>,
+  ): Promise<{ action: "allow" | "deny" | "confirm"; message?: string }> {
+    // Hard floor first: deny rules bind even here.
+    const base = checkPermission(toolName, input, "default", this.planFilePath || undefined);
+    if (base.action === "deny") return base;
+    // Fast-path: read-only / side-effect-free tools skip the classifier.
+    if (AUTO_MODE_FAST_PATH_TOOLS.has(toolName)) return { action: "allow" };
+
+    const sq = this.buildSideQuery();
+    if (!sq) {
+      // No evaluator available → fail closed. Defer to a human if one is present
+      // (interactive), else deny outright (headless: Claude Code aborts here).
+      return this.autoFallback(`${toolName} (auto-mode classifier unavailable)`);
+    }
+    let verdict: { block: boolean; reason: string };
+    try {
+      const rules = loadAutoModeRules();
+      const history = this.useOpenAI ? this.openaiMessages : this.anthropicMessages;
+      const transcript = buildClassifierTranscript(history as any, { toolName, input });
+      const system = buildClassifierSystem(rules);
+      // CLAUDE.md rides in the user message, not the system prompt — it is
+      // untrusted repo content.
+      const user = classifierUserMessage(rules, transcript, loadClaudeMd());
+      const raw = await sq(system, user, this.abortController?.signal);
+      verdict = parseBlockVerdict(raw);
+    } catch (e: any) {
+      // Any setup or classifier error → fail closed (block), matching Claude
+      // Code's iron gate. Wrapping the asset load here too keeps a missing/bad
+      // rules file from crashing the turn and orphaning the tool_use.
+      verdict = { block: true, reason: `classifier error: ${e?.message ?? e}` };
+    }
+
+    if (!verdict.block) {
+      this.autoConsecutiveDenials = 0;
+      return { action: "allow" };
+    }
+
+    this.autoConsecutiveDenials++;
+    this.autoTotalDenials++;
+    if (
+      this.autoConsecutiveDenials >= DENIAL_LIMITS.maxConsecutive ||
+      this.autoTotalDenials >= DENIAL_LIMITS.maxTotal
+    ) {
+      // Too many denials — the classifier may be stuck. Hand back to a human if
+      // interactive; deny in headless (Claude Code aborts the agent here).
+      printInfo(`Auto Mode: denial limit reached — handing back to manual confirmation.`);
+      return this.autoFallback(`[Auto Mode blocked] ${verdict.reason}`);
+    }
+    return { action: "deny", message: `[Auto Mode] ${verdict.reason}` };
+  }
+
+  /** Auto Mode fail-safe: defer to a human confirm if one is available, else
+   *  deny (headless). Never returns "allow" — the point is to not run an
+   *  unjudged action. Auto confirms carry a per-tool digest, not a bare reason,
+   *  so a single approval doesn't whitelist a whole class of later actions. */
+  private autoFallback(message: string): { action: "deny" | "confirm"; message: string } {
+    if (this.confirmFn) return { action: "confirm", message };
+    return { action: "deny", message: `${message} (headless — denied)` };
+  }
+
+  /** Permission mode a spawned sub-agent inherits. plan and auto must carry
+   *  through — a sub-agent otherwise runs bypassPermissions, so in Auto Mode the
+   *  main model could launder a blocked action through `agent(prompt="git push
+   *  origin main")` and have the sub-agent run it unclassified. Claude Code puts
+   *  every sub-agent tool call through canUseTool individually. */
+  private childPermissionMode(): PermissionMode {
+    if (this.permissionMode === "plan") return "plan";
+    if (this.permissionMode === "auto") return "auto";
+    return "bypassPermissions";
   }
 
   // ─── Session restore ───────────────────────────────────────
@@ -930,6 +1345,13 @@ export class Agent {
     if (name === "enter_plan_mode" || name === "exit_plan_mode") return await this.executePlanModeTool(name);
     if (name === "agent") return this.executeAgentTool(input);
     if (name === "skill") return this.executeSkillTool(input);
+    if (name === "schedule_wakeup") {
+      // Only the internal dynamic-loop driver may route here; outside a dynamic
+      // loop the tool isn't exposed, and this guard keeps a stray call (or a
+      // same-named external tool) from reaching the executor.
+      if (!this.scheduleWakeupEnabled) return "schedule_wakeup is only available during /loop dynamic mode.";
+      return this.executeScheduleWakeup(input);
+    }
     // Route MCP tool calls to the MCP manager
     if (this.mcpManager.isMcpTool(name)) return this.mcpManager.callTool(name, input);
     return executeTool(name, input, this.readFileState);
@@ -943,10 +1365,13 @@ export class Agent {
     if (!result) return `Unknown skill: ${input.skill_name}`;
 
     if (result.context === "fork") {
-      // Fork mode: run in isolated sub-agent
-      const tools = result.allowedTools
+      // Fork mode: run in isolated sub-agent. Never pass schedule_wakeup down —
+      // it's a driver-internal tool scoped to this agent's dynamic loop, not
+      // something a forked skill should inherit.
+      const tools = (result.allowedTools
         ? this.tools.filter(t => result.allowedTools!.includes(t.name))
-        : this.tools.filter(t => t.name !== "agent");
+        : this.tools.filter(t => t.name !== "agent"))
+        .filter(t => t.name !== "schedule_wakeup");
 
       printSubAgentStart("skill-fork", input.skill_name);
       const subAgent = new Agent({
@@ -955,7 +1380,7 @@ export class Agent {
         customSystemPrompt: result.prompt,
         customTools: tools,
         isSubAgent: true,
-        permissionMode: this.permissionMode === "plan" ? "plan" : "bypassPermissions",
+        permissionMode: this.childPermissionMode(),
       });
 
       try {
@@ -1115,7 +1540,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       customSystemPrompt: config.systemPrompt,
       customTools: config.tools,
       isSubAgent: true,
-      permissionMode: this.permissionMode === "plan" ? "plan" : "bypassPermissions",
+      permissionMode: this.childPermissionMode(),
     });
 
     try {
@@ -1194,6 +1619,10 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
       const response = await this.callAnthropicStream((block) => {
         const input = block.input as Record<string, any>;
+        // In Auto Mode, only fast-path (classifier-exempt) tools may start early
+        // — otherwise a concurrency-safe-but-classified tool (e.g. web_fetch)
+        // would run before the classifier ever sees it.
+        if (this.permissionMode === "auto" && !AUTO_MODE_FAST_PATH_TOOLS.has(block.name)) return;
         if (CONCURRENCY_SAFE_TOOLS.has(block.name)) {
           const perm = checkPermission(block.name, input, this.permissionMode, this.planFilePath || undefined);
           if (perm.action === "allow") {
@@ -1277,20 +1706,28 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
           continue;
         }
 
-        // Permission check for tools not started early
-        const perm = checkPermission(toolUse.name, input, this.permissionMode, this.planFilePath || undefined);
+        // Permission check for tools not started early. Auto Mode routes
+        // through the transcript classifier; other modes use static rules.
+        const perm = this.permissionMode === "auto"
+          ? await this.classifyToolCall(toolUse.name, input)
+          : checkPermission(toolUse.name, input, this.permissionMode, this.planFilePath || undefined);
         if (perm.action === "deny") {
           printInfo(`Denied: ${perm.message}`);
           toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: `Action denied: ${perm.message}` });
           continue;
         }
-        if (perm.action === "confirm" && perm.message && !this.confirmedPaths.has(perm.message)) {
-          const confirmed = await this.confirmDangerous(perm.message);
-          if (!confirmed) {
-            toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: "User denied this action." });
-            continue;
+        if (perm.action === "confirm" && perm.message) {
+          // Auto Mode confirms carry a reason, not a path — never cache them, or
+          // one approval would whitelist every later action with the same reason.
+          const cacheable = this.permissionMode !== "auto";
+          if (!cacheable || !this.confirmedPaths.has(perm.message)) {
+            const confirmed = await this.confirmDangerous(perm.message);
+            if (!confirmed) {
+              toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: "User denied this action." });
+              continue;
+            }
+            if (cacheable) this.confirmedPaths.add(perm.message);
           }
-          this.confirmedPaths.add(perm.message);
         }
 
         const raw = await this.executeToolCall(toolUse.name, input);
@@ -1498,19 +1935,26 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
         printToolCall(fnName, input);
 
-        const perm = checkPermission(fnName, input, this.permissionMode, this.planFilePath || undefined);
+        const perm = this.permissionMode === "auto"
+          ? await this.classifyToolCall(fnName, input)
+          : checkPermission(fnName, input, this.permissionMode, this.planFilePath || undefined);
         if (perm.action === "deny") {
           printInfo(`Denied: ${perm.message}`);
           oaiChecked.push({ tc, fnName, input, allowed: false, result: `Action denied: ${perm.message}` });
           continue;
         }
-        if (perm.action === "confirm" && perm.message && !this.confirmedPaths.has(perm.message)) {
-          const confirmed = await this.confirmDangerous(perm.message);
-          if (!confirmed) {
-            oaiChecked.push({ tc, fnName, input, allowed: false, result: "User denied this action." });
-            continue;
+        if (perm.action === "confirm" && perm.message) {
+          // Auto Mode confirms carry a reason, not a path — never cache them, or
+          // one approval would whitelist every later action with the same reason.
+          const cacheable = this.permissionMode !== "auto";
+          if (!cacheable || !this.confirmedPaths.has(perm.message)) {
+            const confirmed = await this.confirmDangerous(perm.message);
+            if (!confirmed) {
+              oaiChecked.push({ tc, fnName, input, allowed: false, result: "User denied this action." });
+              continue;
+            }
+            if (cacheable) this.confirmedPaths.add(perm.message);
           }
-          this.confirmedPaths.add(perm.message);
         }
         oaiChecked.push({ tc, fnName, input, allowed: true });
       }

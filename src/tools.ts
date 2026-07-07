@@ -10,9 +10,9 @@ import type Anthropic from "@anthropic-ai/sdk";
 // Note: skill execution is handled in agent.ts (supports fork mode)
 
 // ─── Permission modes ──────────────────────────────────────
-// Mirrors Claude Code's 5 external permission modes.
+// Five permission modes inspired by common Coding Agent permission UX patterns.
 
-export type PermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk";
+export type PermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk" | "auto";
 
 const READ_TOOLS = new Set(["read_file", "list_files", "grep_search", "web_fetch"]);
 const EDIT_TOOLS = new Set(["write_file", "edit_file"]);

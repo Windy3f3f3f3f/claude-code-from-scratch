@@ -1,5 +1,5 @@
 """Tool definitions and execution — 10 tools with 5 permission modes.
-Mirrors Claude Code's tool system: read_file, write_file, edit_file, list_files,
+Tool system inspired by Claude Code's published design: read_file, write_file, edit_file, list_files,
 grep_search, run_shell, skill, enter/exit_plan_mode, agent."""
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .frontmatter import parse_frontmatter
 
 # ─── Permission modes ──────────────────────────────────────
 
-PermissionMode = str  # "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk"
+PermissionMode = str  # "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk" | "auto"
 
 READ_TOOLS = {"read_file", "list_files", "grep_search", "web_fetch"}
 EDIT_TOOLS = {"write_file", "edit_file"}

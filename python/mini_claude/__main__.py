@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plan", action="store_true", help="Plan mode: read-only")
     parser.add_argument("--accept-edits", action="store_true", help="Auto-approve file edits")
     parser.add_argument("--dont-ask", action="store_true", help="Auto-deny confirmations (for CI)")
+    parser.add_argument("--auto", action="store_true", help="Auto Mode: LLM classifier judges each action")
     parser.add_argument("--thinking", action="store_true", help="Enable extended thinking")
     parser.add_argument("--model", "-m", default=None, help="Model to use")
     parser.add_argument("--api-base", default=None, help="OpenAI-compatible API base URL")
@@ -45,6 +46,8 @@ def _resolve_permission_mode(args: argparse.Namespace) -> str:
         return "acceptEdits"
     if args.dont_ask:
         return "dontAsk"
+    if args.auto:
+        return "auto"
     return "default"
 
 
@@ -89,6 +92,11 @@ async def run_repl(agent: Agent) -> None:
 
     def handle_sigint(sig, frame):
         nonlocal sigint_count
+        # Always signal a running /loop or /goal to stop — during its inter-tick
+        # wait or between-turn evaluation the agent isn't "processing", so the
+        # abort path below wouldn't catch it.
+        agent.stop_loop()
+        agent.stop_goal()
         # is_processing tracks the live task; _output_buffer is only set for
         # SUB-agents, so testing it here meant the main agent could never be
         # interrupted mid-task.
@@ -141,6 +149,26 @@ async def run_repl(agent: Agent) -> None:
                 await agent.compact()
             except Exception as e:
                 print_error(str(e))
+            continue
+        if inp == "/goal" or inp.startswith("/goal "):
+            condition = inp[len("/goal"):].strip()
+            if not condition:
+                agent.show_goal()
+                continue
+            directive = agent.set_goal(condition)
+            try:
+                await agent.pursue_goal(directive)
+            except Exception as e:
+                if "abort" not in str(e).lower():
+                    print_error(str(e))
+            continue
+        if inp == "/loop" or inp.startswith("/loop "):
+            rest = inp[len("/loop"):].strip()
+            try:
+                await agent.run_loop(rest)
+            except Exception as e:
+                if "abort" not in str(e).lower():
+                    print_error(str(e))
             continue
         if inp == "/memory":
             memories = list_memories()
@@ -206,6 +234,7 @@ Options:
   --plan              Plan mode: read-only, describe changes without executing
   --accept-edits      Auto-approve file edits, still confirm dangerous shell
   --dont-ask          Auto-deny anything needing confirmation (for CI)
+  --auto              Auto Mode: an LLM classifier judges each action instead of asking
   --thinking          Enable extended thinking (Anthropic only)
   --model, -m         Model to use (default: claude-opus-4-6, or MINI_CLAUDE_MODEL env)
   --api-base URL      Use OpenAI-compatible API endpoint (key via env var)
@@ -219,6 +248,9 @@ REPL commands:
   /plan               Toggle plan mode (read-only <-> normal)
   /cost               Show token usage and cost
   /compact            Manually compact conversation
+  /goal <condition>   Pursue a goal across turns until an evaluator judges it met
+  /goal               Show the active goal's status
+  /loop [interval] <prompt>  Re-run a prompt on an interval (5m/2h) or self-paced
   /memory             List saved memories
   /skills             List available skills
   /<skill-name>       Invoke a skill (e.g. /commit "fix types")

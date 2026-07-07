@@ -14,6 +14,8 @@
   - [10. Plan Mode](docs/10-plan-mode.md)
   - [11. 多 Agent 架构](docs/11-multi-agent.md)
   - [12. MCP 集成](docs/12-mcp.md)
+- **Phase 3: 自主运行**
+  - [15. 自治与续跑（/goal · /loop · Auto Mode）](docs/15-autonomy.md)
 - **总结**
   - [13. 架构对比与下一步](docs/13-whats-next.md)
   - [14. 功能测试指南](docs/14-testing.md)

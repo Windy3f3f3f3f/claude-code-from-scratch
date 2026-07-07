@@ -14,6 +14,8 @@
   - [10. Plan Mode](/en/docs/10-plan-mode.md)
   - [11. Multi-Agent Architecture](/en/docs/11-multi-agent.md)
   - [12. MCP Integration](/en/docs/12-mcp.md)
+- **Phase 3: Autonomous Operation**
+  - [15. Autonomy & Continuation (/goal · /loop · Auto Mode)](/en/docs/15-autonomy.md)
 - **Summary**
   - [13. Architecture Comparison & Next Steps](/en/docs/13-whats-next.md)
   - [14. Testing Guide](/en/docs/14-testing.md)
