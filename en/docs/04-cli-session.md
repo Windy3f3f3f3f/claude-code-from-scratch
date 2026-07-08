@@ -2,7 +2,9 @@
 
 ## Chapter Goals
 
-Build the user interface layer: command-line argument parsing, interactive REPL, Ctrl+C interrupt handling, session persistence and recovery.
+By the end of last chapter the agent's core is complete — loop, tools, System Prompt — but it still has no face to talk to a person through. This chapter builds the user interface.
+
+A command-line entry point parses the arguments (switches like `--yolo`, `--resume`), a REPL lets a person chat a line at a time, Ctrl+C interrupts the current turn midway, and finished conversations are written to disk so `--resume` can pick them back up next time.
 
 ```mermaid
 graph TB
@@ -22,38 +24,6 @@ graph TB
     style Entry fill:#7c5cfc,color:#fff
     style REPL fill:#e8e0ff
 ```
-
-## How Claude Code Does It
-
-Claude Code's entry point is `src/entrypoints/cli.tsx` -- using React/Ink to bring the component model into the terminal, supporting streaming Markdown rendering, Vim mode, multi-tab, keyboard customization. Sessions use JSONL format with append-only writes, making them crash-safe.
-
-### Terminal-Native vs GUI
-
-This is a deliberate choice. Developers' workflows live in the terminal -- opening a browser means a context switch. Being terminal-native makes it just another command-line tool, embedded into existing workflows alongside `git`, `grep`, etc. Specific benefits: works over SSH, can accept pipes (`echo "fix" | claude`), supports tmux multi-instance parallelism, near-zero memory overhead.
-
-React/Ink's role is to compensate for the terminal's interaction limitations -- with the component model, complex UIs like streaming output and diff views become maintainable.
-
-### Observable Autonomy
-
-The core UX principle of Claude Code: **the Agent acts freely, but lets the user see every step in real time**.
-
-```
-read_file src/app.ts
-  1 | import express from ...
-  ... (1234 chars total)
-
-edit_file src/app.ts
-  - const port = 3000
-  + const port = process.env.PORT
-```
-
-The cost of interrupting is far lower than the cost of undoing. Users can hit Ctrl+C within 3 seconds of the Agent going in the wrong direction, rather than waiting 20 seconds for it to finish and then spending even more time undoing. Each tool has 4 rendering methods (start/complete/denied/error), long-running tools stream stdout in real time rather than waiting until completion to display.
-
-### JSONL Session Storage
-
-Whole-JSON overwrite has two problems: a crash mid-write corrupts the entire file; the longer the conversation, the slower each save.
-
-JSONL appends one line per turn, O(1) writes, and a crash loses at most the last line. The filesystem's append operation is typically atomic. Recovery parses line by line, skipping any incomplete line at the end.
 
 ## Our Implementation
 
@@ -456,3 +426,37 @@ def print_tool_result(name: str, result: str) -> None:
 Tool results are truncated to 500 characters at the UI layer -- this display is for humans; the complete result is already in the message history.
 
 > **Next chapter**: Making the Agent's output appear in real time -- streaming output and dual-backend support.
+## What the Real Claude Code Does Beyond This
+
+Our interface is a readline plus a few print calls. Claude Code's is a whole UI framework running in the terminal — the gap is all in making it stable, pleasant, and crash-proof in a real terminal.
+
+Claude Code's entry point is `src/entrypoints/cli.tsx` -- using React/Ink to bring the component model into the terminal, supporting streaming Markdown rendering, Vim mode, multi-tab, keyboard customization. Sessions use JSONL format with append-only writes, making them crash-safe.
+
+### Terminal-Native vs GUI
+
+This is a deliberate choice. Developers' workflows live in the terminal -- opening a browser means a context switch. Being terminal-native makes it just another command-line tool, embedded into existing workflows alongside `git`, `grep`, etc. Specific benefits: works over SSH, can accept pipes (`echo "fix" | claude`), supports tmux multi-instance parallelism, near-zero memory overhead.
+
+React/Ink's role is to compensate for the terminal's interaction limitations -- with the component model, complex UIs like streaming output and diff views become maintainable.
+
+### Observable Autonomy
+
+The core UX principle of Claude Code: **the Agent acts freely, but lets the user see every step in real time**.
+
+```
+read_file src/app.ts
+  1 | import express from ...
+  ... (1234 chars total)
+
+edit_file src/app.ts
+  - const port = 3000
+  + const port = process.env.PORT
+```
+
+The cost of interrupting is far lower than the cost of undoing. Users can hit Ctrl+C within 3 seconds of the Agent going in the wrong direction, rather than waiting 20 seconds for it to finish and then spending even more time undoing. Each tool has 4 rendering methods (start/complete/denied/error), long-running tools stream stdout in real time rather than waiting until completion to display.
+
+### JSONL Session Storage
+
+Whole-JSON overwrite has two problems: a crash mid-write corrupts the entire file; the longer the conversation, the slower each save.
+
+JSONL appends one line per turn, O(1) writes, and a crash loses at most the last line. The filesystem's append operation is typically atomic. Recovery parses line by line, skipping any incomplete line at the end.
+

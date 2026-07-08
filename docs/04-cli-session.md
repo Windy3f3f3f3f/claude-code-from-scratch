@@ -2,7 +2,9 @@
 
 ## 本章目标
 
-构建用户接口层：命令行参数解析、交互式 REPL、Ctrl+C 中断处理、会话持久化和恢复。
+到上一章为止，agent 的内核已经齐了——循环、工具、System Prompt——可它还没有一张能跟人对话的脸。这一章造用户接口。
+
+一个命令行入口负责解析参数（`--yolo`、`--resume` 这些开关），一个 REPL 让人一句一句地聊，Ctrl+C 能中途打断当前这轮，聊完的对话写到磁盘、下次 `--resume` 接着聊。
 
 ```mermaid
 graph TB
@@ -22,38 +24,6 @@ graph TB
     style Entry fill:#7c5cfc,color:#fff
     style REPL fill:#e8e0ff
 ```
-
-## Claude Code 怎么做的
-
-Claude Code 的入口是 `src/entrypoints/cli.tsx`——用 React/Ink 把组件模型搬进终端，支持流式 Markdown 渲染、Vim 模式、多 Tab、键盘自定义。会话用 JSONL 格式追加写入，崩溃安全。
-
-### 终端原生 vs GUI
-
-这是一个主动选择。开发者的工作流在终端里，打开浏览器意味着上下文切换。终端原生就是另一个命令行工具，跟 `git`、`grep` 一样嵌入到已有工作流。具体好处：SSH 环境可用、可接管道 (`echo "fix" | claude`)、支持 tmux 多实例并行、内存开销接近零。
-
-React/Ink 的作用是弥补终端的交互限制——有了组件模型，流式输出、diff 视图这类复杂 UI 才变得可维护。
-
-### 可观察的自主性
-
-Claude Code UX 的核心理念：**Agent 自由行动，但让用户实时看到每一步**。
-
-```
-📖 read_file src/app.ts
-  1 | import express from ...
-  ... (1234 chars total)
-
-✏️ edit_file src/app.ts
-  - const port = 3000
-  + const port = process.env.PORT
-```
-
-中断成本远低于撤销成本。用户在 Agent 走错方向前 3 秒就能按 Ctrl+C，而不是等 20 秒执行完再花更多时间撤销。每个工具有 4 种渲染方法（开始/完成/被拒/报错），长时间运行的工具实时流式输出 stdout，而不是等完成才展示。
-
-### JSONL 会话存储
-
-整体 JSON 覆盖写入有两个问题：写入中途崩溃会损坏整个文件；对话越长每次保存越慢。
-
-JSONL 每轮追加一行，O(1) 写入，崩溃最多丢最后一行。文件系统的 append 操作通常是原子的。恢复时逐行解析，跳过末尾不完整的行即可。
 
 ## 我们的实现
 
@@ -456,3 +426,37 @@ def print_tool_result(name: str, result: str) -> None:
 工具结果在 UI 层截断到 500 字符——这是给人看的显示，完整结果已在消息历史中。
 
 > **下一章**：让 Agent 的输出实时显示——流式输出与双后端支持。
+## 真实 Claude Code 比这多做了什么
+
+我们的界面是一个 readline 加几行打印。Claude Code 的界面是一整套跑在终端里的 UI 框架——差距全在「让它在真实终端里稳、好用、崩不坏」这些地方。
+
+Claude Code 的入口是 `src/entrypoints/cli.tsx`——用 React/Ink 把组件模型搬进终端，支持流式 Markdown 渲染、Vim 模式、多 Tab、键盘自定义。会话用 JSONL 格式追加写入，崩溃安全。
+
+### 终端原生 vs GUI
+
+这是一个主动选择。开发者的工作流在终端里，打开浏览器意味着上下文切换。终端原生就是另一个命令行工具，跟 `git`、`grep` 一样嵌入到已有工作流。具体好处：SSH 环境可用、可接管道 (`echo "fix" | claude`)、支持 tmux 多实例并行、内存开销接近零。
+
+React/Ink 的作用是弥补终端的交互限制——有了组件模型，流式输出、diff 视图这类复杂 UI 才变得可维护。
+
+### 可观察的自主性
+
+Claude Code UX 的核心理念：**Agent 自由行动，但让用户实时看到每一步**。
+
+```
+📖 read_file src/app.ts
+  1 | import express from ...
+  ... (1234 chars total)
+
+✏️ edit_file src/app.ts
+  - const port = 3000
+  + const port = process.env.PORT
+```
+
+中断成本远低于撤销成本。用户在 Agent 走错方向前 3 秒就能按 Ctrl+C，而不是等 20 秒执行完再花更多时间撤销。每个工具有 4 种渲染方法（开始/完成/被拒/报错），长时间运行的工具实时流式输出 stdout，而不是等完成才展示。
+
+### JSONL 会话存储
+
+整体 JSON 覆盖写入有两个问题：写入中途崩溃会损坏整个文件；对话越长每次保存越慢。
+
+JSONL 每轮追加一行，O(1) 写入，崩溃最多丢最后一行。文件系统的 append 操作通常是原子的。恢复时逐行解析，跳过末尾不完整的行即可。
+
