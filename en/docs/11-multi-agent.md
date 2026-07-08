@@ -2,7 +2,9 @@
 
 ## Chapter Goals
 
-Implement a Sub-Agent system: allow the main Agent to spawn independent sub-agents that perform exploration, planning, and general tasks, returning results to the main Agent when complete. This is Claude Code's most important "divide and conquer" mechanism for handling complex tasks.
+Cram a big task into one agent and the context fills up fast. This chapter builds sub-agents so the main agent can farm work out.
+
+The main agent spawns an independent sub-agent to chew on a sub-task — exploring code, planning, or general work. The sub-agent has its own clean context and brings back only the result, instead of pouring all the intermediate steps back into the main conversation. That's divide and conquer, and it's the way out when the main agent's context runs short.
 
 ```mermaid
 graph TB
@@ -27,54 +29,6 @@ graph TB
     style Dispatch fill:#e8e0ff
     style Result fill:#e8e0ff
 ```
-
-## How Claude Code Does It
-
-Claude Code's multi-agent system is implemented in `src/tools/AgentTool/`, supporting three collaboration modes:
-
-| Mode | Characteristics |
-|------|----------------|
-| **Sub-Agent** (fork-return) | Forks to execute independently, returns result on completion |
-| **Coordinator** | A coordinator assigns tasks to multiple Workers |
-| **Swarm Team** | Multiple Agents collaborate as peers, communicating via mailboxes |
-
-We implement the Sub-Agent mode, which is also the most commonly used.
-
-### Built-in Agent Types
-
-- **Explore**: Uses Haiku model (cheaper), read-only tool set, specialized for code search
-- **Plan**: Read-only + structured output, designs implementation plans
-- **General**: Full tool set (except it cannot recursively create sub-agents)
-- **Custom**: Defined via `.claude/agents/*.md` files
-
-### Key Design of Coordinator Mode
-
-Coordinator turns the main Agent into a **pure orchestrator** -- its tool set is hard-limited to only `Agent` (spawn Workers) and `SendMessage` (continue a Worker), with absolutely no ability to perform file operations. This hard constraint prevents the coordinator from "being too lazy to delegate and doing it itself," which would cause it to degrade into a regular single Agent.
-
-The standard workflow has four phases: **Research (parallel, read-only) -> Synthesize (coordinator, serial comprehension) -> Implement (serial, by file set) -> Verify**.
-
-The synthesis phase has a counter-intuitive constraint: the prompt explicitly forbids writing "based on your findings." This forces the coordinator to genuinely understand and make research results concrete (including file paths, line numbers), rather than passing the comprehension work to the next Worker.
-
-Each Worker is an independent Agent starting from scratch that cannot see the coordinator's conversation with the user, so the prompt the coordinator writes for Workers must be self-contained -- this is the biggest pitfall in Coordinator mode.
-
-### Tool Filtering: 4-Layer Pipeline
-
-Sub-agent tool access goes through a 4-layer filter, implementing defense in depth:
-
-1. Remove meta-tools (`TaskOutput`, `EnterPlanMode`, `AskUserQuestion`, etc.) -- sub-agents should not control Agent execution flow
-2. Additional restrictions for custom Agents -- user-defined types don't get the same trust level as built-in types
-3. Async Agents use a whitelist mode -- background execution can't display interactive UI, requiring strict limits
-4. Agent-type-level `disallowedTools` -- e.g., Explore explicitly excludes write tools
-
-The first three layers are global policies; the fourth is type-level policy. Even if a custom Agent sets `disallowedTools: []`, the first three layers still apply.
-
-### Context Isolation
-
-Sub-agents use deny-by-default: message history is completely independent, `abortController` propagates one-way (parent abort -> child abort, but not the reverse), and sub-agent state changes don't propagate to the parent UI by default. There's only one exception: background processes started by Bash must be registered in the root store, or they become zombie processes.
-
-### Worktree Isolation
-
-When multiple Agents write files in parallel, Claude Code assigns each writing Agent an independent Git Worktree -- sharing the `.git` directory but with independent working directories, completely conflict-free, with much less overhead than `git clone`.
 
 ## Our Implementation
 
@@ -547,6 +501,56 @@ You are a code reviewer. Analyze the code thoroughly and report:
 ```
 
 Discovery mechanism: Project-level (`.claude/agents/`) has higher priority than user-level (`~/.claude/agents/`), with same-name override. Frontmatter reuses `parseFrontmatter()`, sharing the same parser with Memory and Skills.
+
+## What the Real Claude Code Does Beyond This
+
+Our sub-agents have just one mode: fork-return — send one out, get a result back. Claude Code's multi-agent system also has coordinator and swarm modes, where agents communicate peer-to-peer and explore in parallel.
+
+Claude Code's multi-agent system is implemented in `src/tools/AgentTool/`, supporting three collaboration modes:
+
+| Mode | Characteristics |
+|------|----------------|
+| **Sub-Agent** (fork-return) | Forks to execute independently, returns result on completion |
+| **Coordinator** | A coordinator assigns tasks to multiple Workers |
+| **Swarm Team** | Multiple Agents collaborate as peers, communicating via mailboxes |
+
+We implement the Sub-Agent mode, which is also the most commonly used.
+
+### Built-in Agent Types
+
+- **Explore**: Uses Haiku model (cheaper), read-only tool set, specialized for code search
+- **Plan**: Read-only + structured output, designs implementation plans
+- **General**: Full tool set (except it cannot recursively create sub-agents)
+- **Custom**: Defined via `.claude/agents/*.md` files
+
+### Key Design of Coordinator Mode
+
+Coordinator turns the main Agent into a **pure orchestrator** -- its tool set is hard-limited to only `Agent` (spawn Workers) and `SendMessage` (continue a Worker), with absolutely no ability to perform file operations. This hard constraint prevents the coordinator from "being too lazy to delegate and doing it itself," which would cause it to degrade into a regular single Agent.
+
+The standard workflow has four phases: **Research (parallel, read-only) -> Synthesize (coordinator, serial comprehension) -> Implement (serial, by file set) -> Verify**.
+
+The synthesis phase has a counter-intuitive constraint: the prompt explicitly forbids writing "based on your findings." This forces the coordinator to genuinely understand and make research results concrete (including file paths, line numbers), rather than passing the comprehension work to the next Worker.
+
+Each Worker is an independent Agent starting from scratch that cannot see the coordinator's conversation with the user, so the prompt the coordinator writes for Workers must be self-contained -- this is the biggest pitfall in Coordinator mode.
+
+### Tool Filtering: 4-Layer Pipeline
+
+Sub-agent tool access goes through a 4-layer filter, implementing defense in depth:
+
+1. Remove meta-tools (`TaskOutput`, `EnterPlanMode`, `AskUserQuestion`, etc.) -- sub-agents should not control Agent execution flow
+2. Additional restrictions for custom Agents -- user-defined types don't get the same trust level as built-in types
+3. Async Agents use a whitelist mode -- background execution can't display interactive UI, requiring strict limits
+4. Agent-type-level `disallowedTools` -- e.g., Explore explicitly excludes write tools
+
+The first three layers are global policies; the fourth is type-level policy. Even if a custom Agent sets `disallowedTools: []`, the first three layers still apply.
+
+### Context Isolation
+
+Sub-agents use deny-by-default: message history is completely independent, `abortController` propagates one-way (parent abort -> child abort, but not the reverse), and sub-agent state changes don't propagate to the parent UI by default. There's only one exception: background processes started by Bash must be registered in the root store, or they become zombie processes.
+
+### Worktree Isolation
+
+When multiple Agents write files in parallel, Claude Code assigns each writing Agent an independent Git Worktree -- sharing the `.git` directory but with independent working directories, completely conflict-free, with much less overhead than `git clone`.
 
 ## Key Design Decisions
 

@@ -2,7 +2,9 @@
 
 ## 本章目标
 
-实现 Sub-Agent（子代理）系统：让主 Agent 能派生出独立的子 Agent 执行探索、规划、通用任务，完成后将结果返回主 Agent。这是 Claude Code 处理复杂任务时最重要的"分而治之"机制。
+一个大任务全塞进一个 agent，上下文很快就满了。这一章造子 agent，让主 agent 能把活分出去。
+
+主 agent 派生一个独立的子 agent 去啃某个子任务——探索代码、做规划、跑通用活。子 agent 有自己干净的上下文，啃完只把结果带回来，不把一路的中间过程都灌回主对话。这就是「分而治之」，也是主 agent 上下文不够用时的出路。
 
 ```mermaid
 graph TB
@@ -27,54 +29,6 @@ graph TB
     style Dispatch fill:#e8e0ff
     style Result fill:#e8e0ff
 ```
-
-## Claude Code 怎么做的
-
-Claude Code 的多 Agent 体系在 `src/tools/AgentTool/` 中实现，支持三种协作模式：
-
-| 模式 | 特点 |
-|------|------|
-| **Sub-Agent**（fork-return） | 分叉独立执行，完成后返回结果 |
-| **Coordinator** | 一个协调者分配任务给多个 Worker |
-| **Swarm Team** | 多 Agent 对等协作，通过信箱通信 |
-
-我们实现的是 Sub-Agent 模式，也是最常用的。
-
-### 内置 Agent 类型
-
-- **Explore**：用 Haiku 模型（更便宜），只读工具集，专门用于代码搜索
-- **Plan**：只读 + 结构化输出，设计实现方案
-- **General**：完整工具集（除了不能递归创建子 Agent）
-- **Custom**：通过 `.claude/agents/*.md` 文件定义
-
-### Coordinator 模式的关键设计
-
-Coordinator 将主 Agent 变为**纯编排者**——工具集被硬限制为只有 `Agent`（派生 Worker）和 `SendMessage`（续传 Worker），完全无法执行文件操作。这个硬约束防止协调器"懒得委托、自己动手"而退化成普通单 Agent。
-
-标准工作流分四阶段：**研究（并行只读）→ 综合（协调器串行理解）→ 实施（按文件集串行）→ 验证**。
-
-其中综合阶段有个反直觉的约束：提示词里明确禁止写 "based on your findings"。这强制协调器真正理解并具体化研究结果（包含文件路径、行号），而不是把理解工作转包给下一个 Worker。
-
-每个 Worker 都是从零开始的独立 Agent，看不到协调器与用户的对话，所以协调器写给 Worker 的 prompt 必须自包含——这是 Coordinator 模式中最容易踩坑的地方。
-
-### 工具过滤：4 层管道
-
-子 Agent 的工具访问经过 4 层过滤，实现纵深防御：
-
-1. 移除元工具（`TaskOutput`、`EnterPlanMode`、`AskUserQuestion` 等）——子 Agent 不应控制 Agent 执行流程
-2. 对自定义 Agent 额外限制——用户定义的类型不与内建类型同级信任
-3. 异步 Agent 用白名单模式——后台运行无法展示交互 UI，必须严格限制
-4. Agent 类型级 `disallowedTools`——如 Explore 显式排除写入工具
-
-前三层是全局策略，第四层是类型策略。即使自定义 Agent 设置了 `disallowedTools: []`，前三层仍然有效。
-
-### 上下文隔离
-
-子 Agent 采用 deny-by-default：消息历史完全独立，`abortController` 单向传播（父中断→子中断，反之不行），子 Agent 的状态变更默认不传播到父级 UI。只有一个例外：Bash 启动的后台进程必须注册到根 store，否则成为僵尸进程。
-
-### Worktree 隔离
-
-多 Agent 并行写文件时，Claude Code 给每个写操作 Agent 分配独立的 Git Worktree——共享 `.git` 目录但有独立工作目录，完全无冲突，开销比 `git clone` 小得多。
 
 ## 我们的实现
 
@@ -547,6 +501,56 @@ You are a code reviewer. Analyze the code thoroughly and report:
 ```
 
 发现机制：项目级（`.claude/agents/`）优先级高于用户级（`~/.claude/agents/`），同名覆盖。frontmatter 复用 `parseFrontmatter()`，与 Memory 和 Skills 共享同一套解析器。
+
+## 真实 Claude Code 比这多做了什么
+
+我们的子 agent 只有 fork-return 一种玩法：派出去、拿回结果。Claude Code 的多 agent 体系还有协调者、蜂群这些模式，agent 之间能对等通信、并行探索。
+
+Claude Code 的多 Agent 体系在 `src/tools/AgentTool/` 中实现，支持三种协作模式：
+
+| 模式 | 特点 |
+|------|------|
+| **Sub-Agent**（fork-return） | 分叉独立执行，完成后返回结果 |
+| **Coordinator** | 一个协调者分配任务给多个 Worker |
+| **Swarm Team** | 多 Agent 对等协作，通过信箱通信 |
+
+我们实现的是 Sub-Agent 模式，也是最常用的。
+
+### 内置 Agent 类型
+
+- **Explore**：用 Haiku 模型（更便宜），只读工具集，专门用于代码搜索
+- **Plan**：只读 + 结构化输出，设计实现方案
+- **General**：完整工具集（除了不能递归创建子 Agent）
+- **Custom**：通过 `.claude/agents/*.md` 文件定义
+
+### Coordinator 模式的关键设计
+
+Coordinator 将主 Agent 变为**纯编排者**——工具集被硬限制为只有 `Agent`（派生 Worker）和 `SendMessage`（续传 Worker），完全无法执行文件操作。这个硬约束防止协调器"懒得委托、自己动手"而退化成普通单 Agent。
+
+标准工作流分四阶段：**研究（并行只读）→ 综合（协调器串行理解）→ 实施（按文件集串行）→ 验证**。
+
+其中综合阶段有个反直觉的约束：提示词里明确禁止写 "based on your findings"。这强制协调器真正理解并具体化研究结果（包含文件路径、行号），而不是把理解工作转包给下一个 Worker。
+
+每个 Worker 都是从零开始的独立 Agent，看不到协调器与用户的对话，所以协调器写给 Worker 的 prompt 必须自包含——这是 Coordinator 模式中最容易踩坑的地方。
+
+### 工具过滤：4 层管道
+
+子 Agent 的工具访问经过 4 层过滤，实现纵深防御：
+
+1. 移除元工具（`TaskOutput`、`EnterPlanMode`、`AskUserQuestion` 等）——子 Agent 不应控制 Agent 执行流程
+2. 对自定义 Agent 额外限制——用户定义的类型不与内建类型同级信任
+3. 异步 Agent 用白名单模式——后台运行无法展示交互 UI，必须严格限制
+4. Agent 类型级 `disallowedTools`——如 Explore 显式排除写入工具
+
+前三层是全局策略，第四层是类型策略。即使自定义 Agent 设置了 `disallowedTools: []`，前三层仍然有效。
+
+### 上下文隔离
+
+子 Agent 采用 deny-by-default：消息历史完全独立，`abortController` 单向传播（父中断→子中断，反之不行），子 Agent 的状态变更默认不传播到父级 UI。只有一个例外：Bash 启动的后台进程必须注册到根 store，否则成为僵尸进程。
+
+### Worktree 隔离
+
+多 Agent 并行写文件时，Claude Code 给每个写操作 Agent 分配独立的 Git Worktree——共享 `.git` 目录但有独立工作目录，完全无冲突，开销比 `git clone` 小得多。
 
 ## 关键设计决策
 
