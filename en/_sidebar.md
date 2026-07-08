@@ -1,5 +1,5 @@
 - [Home](/en/)
-- [Introduction: Why Build from Scratch?](/en/docs/00-introduction.md)
+- [Introduction: Building from an Empty Loop](/en/docs/00-introduction.md)
 - **Phase 1: Build a Working Coding Agent**
   - [1. Agent Loop — Core Loop](/en/docs/01-agent-loop.md)
   - [2. Tool System](/en/docs/02-tools.md)

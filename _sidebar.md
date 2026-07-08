@@ -1,5 +1,5 @@
 - [首页](/)
-- [引言：为什么从零造？](docs/00-introduction.md)
+- [引言：从一个空循环开始](docs/00-introduction.md)
 - **Phase 1: 构建一个可用的 Coding Agent**
   - [1. Agent Loop — 核心循环](docs/01-agent-loop.md)
   - [2. 工具系统](docs/02-tools.md)

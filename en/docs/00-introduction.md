@@ -1,56 +1,58 @@
-# Introduction: Why Build a Claude Code from Scratch?
+# Introduction: Building a Claude Code from an Empty Loop
 
 ## Chapter Goals
 
-Understand the project's positioning, technology stack choices, and overall architecture. Get your own coding agent running in 5 minutes.
+Explain what this project does, why it's worth building from scratch, and what you end up with — then get it running in five minutes.
 
-## Why Build from Scratch?
+## From "Giving Suggestions" to "Taking Action"
 
-### Three Phases of AI Programming
+AI-assisted programming has gone through three phases: code completion (Copilot), chat assistant (Cursor Chat), and autonomous Agent (Claude Code). The first two share one ceiling — the model can only suggest, not act. Ask it to fix a bug and it hands back a snippet, but it can't run the tests, see the error, and revise based on the result.
 
-AI-assisted programming has gone through roughly three phases: **code completion** (Copilot) -> **chat assistant** (Cursor Chat) -> **autonomous Agent** (Claude Code).
+Claude Code crosses that line. Say "add user registration to this project" and it searches the routes, reads the database models, creates the handler, writes tests, runs `npm test`, sees the failure, revises, and runs again — a dozen rounds until the tests pass. It isn't completing code; it's carrying out a task.
 
-The first two phases share the same limitation: **the model cannot take actions**. It can only offer suggestions -- it can't run tests and see the results on its own.
-
-Claude Code is a qualitative leap. You say "add user registration to this project," and it will search for route definitions, read database models, create handler files, register routes, write tests, run `npm test`, see failures, fix them, run again -- looping dozens of times until everything passes.
-
-This is the **controlled tool-loop Agent**: the model is the decision-maker, and code is just the execution environment.
-
-### What Agent-first Means
-
-In traditional programs, code logic determines behavior -- every `if/else` is written in advance by the programmer. Agent architecture reverses this: **the model decides what to do next**, and the code merely provides the loop framework and tools.
-
-The core of the entire system is a `while (true)` loop:
+What makes this possible isn't some elaborate magic. It's a loop:
 
 ```
 while (true) {
-    call model -> model returns response
-    if (response contains tool calls) -> execute tools -> feed results back to model -> continue loop
-    if (response is just text) -> task complete, exit loop
+    call the model, get its reply
+    reply has a tool call?  -> run the tool, feed the result back, continue
+    reply is just text?     -> task done, exit
 }
 ```
 
-**The loop only exits when the model's response contains no tool calls** -- it's the model, not the code logic, that decides whether the task is complete.
+In a traditional program, the next step is written in advance by the programmer with `if/else`. This loop flips that around: the model decides the next step, and the code only keeps the loop turning and hands the tools over. That single reversal is the entire difference between a coding agent and an ordinary chatbot.
 
-### Why Not Just Read the Source Code
+## Why Build from Scratch Instead of Reading the Source
 
-Claude Code's open-source snapshot has 500,000 lines of TypeScript: 66+ tools, React/Ink TUI, MCP protocol, OAuth authentication, multi-agent system... Diving straight in makes it easy to get lost in edge cases and abstraction layers.
+The real Claude Code wraps that loop in half a million lines of TypeScript — 66 tools, a React/Ink terminal UI, the MCP protocol, OAuth, a multi-agent system. Reading through all of that, it's easy to drown in edge cases and abstraction layers and still not be able to say what the loop looks like.
 
-Our approach: **keep only the minimal necessary components**, reproducing core capabilities in ~3400 lines of code (memory, skills, multi-Agent, permission rules, tiered compaction, budget control, Plan Mode), with each step explained against the real source code. It's like building a go-kart to understand how cars work -- engine, steering wheel, and brakes are all there; air conditioning and stereo can wait.
+This project goes the other way: it takes the loop out on its own and rebuilds it with the smallest amount of code, one piece at a time. The starting point is a dozen-line loop that can only chat; each chapter adds one capability, and every piece runs on its own. By the end it's an agent that reads code, edits files, runs tests, and loops until they pass — about 5,500 lines in TypeScript, about 5,000 in Python, the two mirroring each other. It's like understanding a car through a go-kart: engine, steering, brakes all there, air conditioning and stereo left out, but every important bolt tightened in plain sight.
 
-## Core Concepts at a Glance
+## What Each Chapter Builds
 
-**Agent Loop**: The think-act-observe cycle. After receiving a request, the model decides which tool to call. The system executes the tool and feeds the result back to the model, which continues thinking until it no longer issues tool calls.
+This table is the core build line. Each row is a chapter; the right side is what the agent newly learns to do by the end of it — from "only chats" all the way to "gets work done on its own":
 
-**Tool System**: Tools are the bridge between the Agent and the real world. We describe each tool's name and parameters in the System Prompt. When the model needs one, it returns a structured tool call request, and the code executes it and feeds the result back.
+| Chapter | After this chapter, the agent can… |
+|---|---|
+| 1. Agent Loop | call tools and feed results back to itself, instead of only chatting |
+| 2. Tool System | read/write files, run Shell, search code — actually change the project |
+| 3. System Prompt | know what OS, directory, and Git state it's working in |
+| 4. CLI & Sessions | run an interactive command line; save conversations and `--resume` them |
+| 5. Streaming Output | display as it generates, and talk to OpenAI-compatible models |
+| 6. Permissions & Security | ask before dangerous actions; deny rules stop overreach |
+| 7. Context Management | auto-compress long conversations; run dozens of turns without overflowing |
+| 8. Memory System | remember preferences and project facts across sessions, recalled on demand |
+| 9. Skills System | package common operations into reusable skills, invoked as needed |
+| 10. Plan Mode | present a read-only plan first, act only once approved |
+| 11. Multi-Agent | fork a sub-agent for a task too big for one context, bring the result back |
+| 12. MCP Integration | connect external tool servers to extend the tool set |
+| 13. Architecture Comparison | line up against the real Claude Code and see where the minimal build differs |
 
-**Context Engineering**: The model's performance depends entirely on what it sees. The context window is limited (200K tokens), but complex tasks may run dozens of rounds -- so compaction is needed. We implement 4 levels of compaction: trim large outputs -> summarize tool results -> model summarizes the entire conversation. Each level is more aggressive than the last, and the system tries to solve the problem with the lightest approach possible.
+Two chapters sit beyond this line: Chapter 14 checks whether the agent really runs, with 19 manual scenarios; Chapter 15 adds the "autonomy" trio (`/goal`, `/loop`, Auto Mode), letting the agent keep pushing a task forward and judge permissions action by action.
 
-**System Prompt**: The first message assembled before every API call, telling the model the current operating system, working directory, Git status, project rules (CLAUDE.md), and available tool list. This context directly affects the quality of the model's decisions.
+## What It Looks Like When Finished
 
-**Permissions and Security**: An Agent that can execute arbitrary shell commands needs safety controls. We implement 5 permission modes, from "allow everything" to "ask the user for everything" -- checking whether writes are allowed before they happen, and requiring confirmation for dangerous operations.
-
-## Architecture Overview
+Assembled, the pieces connect like this. No need to understand every box here; each later chapter adds one of them:
 
 ```mermaid
 graph TB
@@ -59,9 +61,9 @@ graph TB
     Agent --> Prompt[prompt.ts<br/>System Prompt]
     Agent --> API{API Backend}
     API -->|Anthropic| AnthropicSDK[Anthropic SDK]
-    API -->|OpenAI Compatible| OpenAISDK[OpenAI SDK]
+    API -->|OpenAI-compatible| OpenAISDK[OpenAI SDK]
     Agent --> Tools[tools.ts<br/>Tool System]
-    Tools --> FS[File Read/Write]
+    Tools --> FS[File I/O]
     Tools --> Shell[Shell Commands]
     Tools --> Search[Search Tools]
     Tools --> SkillTool[skill tool]
@@ -85,62 +87,52 @@ graph TB
     style MCP fill:#e0f0ff
 ```
 
-The main flow is clear: **User input -> CLI -> Agent Loop -> Model decision -> Tool execution -> Result feedback -> Loop until complete**
-
-Component responsibilities:
-
-- **`cli.ts`**: Parses command-line arguments, provides interactive REPL
-- **`agent.ts`**: Core engine (~1263 lines). Assembles messages, calls API, parses responses, executes tools, compacts context, controls budget
-- **`prompt.ts`**: Combines static prompt template with dynamic environment info (OS, directory, Git status, memory, skills) into the System Prompt
-- **`tools.ts`**: Definitions + execution logic + permission checks + deferred loading for 13 tools
-- **`memory.ts` / `skills.ts`**: Memory lets the Agent remember information across sessions (with semantic recall); skills provide reusable action sequences. Both are injected into the System Prompt at startup
-- **`subagent.ts`**: When a task exceeds a single context window, forks a sub-Agent to handle the subtask and returns the result
-- **`mcp.ts`**: MCP protocol client, connects to external tool servers via JSON-RPC over stdio
-- **`session.ts`**: Writes conversation history to disk, supports `--resume` to restore
-- **`ui.ts`**: Terminal colors and formatted output
+The main line in one sentence: input comes in, the CLI hands it to the Agent Loop, the model decides which tool to call, the code runs it and feeds the result back, and the loop turns until the model says "done." At the center, `agent.ts` is the engine (~2,169 lines) — message assembly, API calls, tool orchestration, context compression, and budget control all live here. The rest each mind one thing, none of them large:
 
 | File | Lines | Responsibility |
-|------|-------|----------------|
-| `agent.ts` | ~1263 | Agent main loop: message construction, API calls, tool orchestration, streaming execution, sub-Agent, 4-tier compaction, budget control, Plan Mode |
-| `tools.ts` | ~850 | Tool definitions + execution: 13 tools + 5 permission modes + mtime protection + deferred loading |
-| `cli.ts` | ~371 | CLI entry, argument parsing, REPL interaction |
-| `memory.ts` | ~325 | Memory system: 4 types + file storage + semantic recall + async prefetch |
-| `mcp.ts` | ~266 | MCP client: JSON-RPC over stdio, tool discovery and call forwarding |
-| `ui.ts` | ~211 | Terminal output: colors, formatting |
-| `skills.ts` | ~175 | Skills system: directory discovery + frontmatter parsing + inline/fork dual modes |
-| `subagent.ts` | ~199 | Sub-Agent configuration (3 built-in + custom Agent discovery) |
-| `prompt.ts` | ~154 | System Prompt construction: template + @include + variable substitution + memory/skills injection |
+|------|------|------|
+| `agent.ts` | ~2169 | Agent main loop: message construction, API calls, tool orchestration, streaming execution, sub-agents, 4-layer compression, budget, Plan Mode, autonomy trio |
+| `tools.ts` | ~884 | Tool definitions and execution: 12 resident tools, 6 permission modes, mtime protection, lazy loading (`/loop` dynamic additionally mounts `schedule_wakeup` temporarily) |
+| `autonomy.ts` | ~464 | Autonomy trio: `/goal` evaluator, `/loop` scheduling, Auto Mode classifier |
+| `cli.ts` | ~416 | CLI entry, argument parsing, REPL interaction |
+| `memory.ts` | ~392 | Memory system: 4 types, file storage, semantic recall, async prefetch |
+| `mcp.ts` | ~277 | MCP client: JSON-RPC over stdio, tool discovery and forwarding |
+| `prompt.ts` | ~253 | System Prompt construction: template, @include, variable substitution, memory/skill injection |
+| `ui.ts` | ~215 | Terminal output: color, formatting |
+| `subagent.ts` | ~199 | Sub-agent config: 3 built-in types + custom agent discovery |
+| `skills.ts` | ~175 | Skills system: directory discovery, frontmatter parsing, inline/fork modes |
 | `session.ts` | ~63 | Session persistence: JSON file storage |
-| `frontmatter.ts` | ~41 | YAML frontmatter parser |
-| `python/` | -- | Full Python implementation (`mini_claude/` package, ~2920 lines) |
+| `frontmatter.ts` | ~41 | YAML frontmatter parsing |
+
+The Python version is a complete mirror of the same structure, in the `python/mini_claude/` package, about 5,000 lines.
 
 ## Technology Stack
 
-Both TypeScript and Python versions are implemented separately -- just pick whichever you're comfortable with.
+The dependencies fit in one glance — no framework, no build toolchain.
 
 <!-- tabs:start -->
 #### **TypeScript**
 
 ```
-TypeScript           -- Type safety, same language as Claude Code
-@anthropic-ai/sdk    -- Anthropic official SDK
-openai               -- OpenAI compatible backend support
-chalk                -- Terminal color output
-glob                 -- File pattern matching
+TypeScript           — type-safe, same language as Claude Code
+@anthropic-ai/sdk    — official Anthropic SDK
+openai               — OpenAI-compatible backend support
+chalk                — terminal color output
+glob                 — file pattern matching
 ```
 
 #### **Python**
 
 ```
-Python 3.11+         -- Clean and readable
-anthropic            -- Anthropic official SDK
-openai               -- OpenAI compatible backend support
+Python 3.11+         — clean and readable
+anthropic            — official Anthropic SDK
+openai               — OpenAI-compatible backend support
 ```
 <!-- tabs:end -->
 
-No frameworks, no build toolchains -- just the most basic dependencies.
+## Get It Running
 
-## Quick Start
+Install, give it an API key, run it — five minutes.
 
 <!-- tabs:start -->
 #### **TypeScript**
@@ -164,7 +156,7 @@ mini-claude-py "hello"
 ```
 <!-- tabs:end -->
 
-After starting:
+On startup:
 
 ```
   Mini Claude Code — A minimal coding agent
@@ -175,40 +167,45 @@ After starting:
 >
 ```
 
-Try `read src/agent.ts and explain the main loop`.
+Try `read src/agent.ts and explain the main loop` and watch it read the file and explain on its own.
 
-### Other Options
+The command line has these switches too; each is covered later where its underlying feature is built:
 
 ```bash
-mini-claude --yolo "run all tests"          # Skip all confirmations
-mini-claude --plan "analyze this codebase"  # Analyze only, no modifications
-mini-claude --accept-edits "refactor"       # Auto-approve file edits
-mini-claude --dont-ask "check style"        # Auto-deny operations requiring confirmation
-mini-claude --thinking "analyze this bug"   # Enable Extended Thinking
-mini-claude --resume                        # Resume last session
-mini-claude --max-cost 0.50 --max-turns 20  # Budget control
+mini-claude --yolo "run all tests"          # skip all confirmations
+mini-claude --plan "analyze this codebase"  # analyze only, no changes
+mini-claude --accept-edits "refactor"       # auto-approve file edits
+mini-claude --dont-ask "check style"        # auto-deny actions needing confirmation
+mini-claude --auto "fix the failing test"   # Auto Mode: a classifier judges each action
+mini-claude --thinking "analyze this bug"   # enable Extended Thinking
+mini-claude --resume                        # resume the last session
+mini-claude --max-cost 0.50 --max-turns 20  # budget control
 ```
 
-## Chapter Overview
+## Where to Find the Corresponding Source
 
-| Chapter | mini-claude File | Corresponding Claude Code Source |
-|---------|-----------------|----------------------------------|
-| **Phase 1: Building a Working Coding Agent** | | |
-| [1. Agent Loop](/en/docs/01-agent-loop.md) | `agent.ts`'s `chatAnthropic()` | `src/query.ts`'s `queryLoop` |
+Each chapter explains how the minimal version is built, and points to the matching location in the real Claude Code source, so you can compare after building:
+
+| Chapter | mini-claude file | Claude Code source |
+|------|-----------------|---------------------|
+| **Phase 1: Build a Working Coding Agent** | | |
+| [1. Agent Loop](/en/docs/01-agent-loop.md) | `chatAnthropic()` in `agent.ts` | `queryLoop` in `src/query.ts` |
 | [2. Tool System](/en/docs/02-tools.md) | `tools.ts` | `src/Tool.ts` + `src/tools/` (66+ tools) |
 | [3. System Prompt](/en/docs/03-system-prompt.md) | `prompt.ts` | `src/constants/prompts.ts` |
-| [4. CLI and Sessions](/en/docs/04-cli-session.md) | `cli.ts` + `session.ts` | `src/entrypoints/cli.tsx` |
-| [5. Streaming Output](/en/docs/05-streaming.md) | `agent.ts`'s two stream methods | `src/services/api/claude.ts` |
-| [6. Permissions and Security](/en/docs/06-permissions.md) | `tools.ts`'s `checkPermission()` + rule config | `src/utils/permissions/` (52KB) |
-| [7. Context Management](/en/docs/07-context.md) | `agent.ts`'s `checkAndCompact()` | `src/services/compact/` |
+| [4. CLI & Sessions](/en/docs/04-cli-session.md) | `cli.ts` + `session.ts` | `src/entrypoints/cli.tsx` |
+| [5. Streaming Output](/en/docs/05-streaming.md) | the two stream methods in `agent.ts` | `src/services/api/claude.ts` |
+| [6. Permissions & Security](/en/docs/06-permissions.md) | `checkPermission()` + rule config in `tools.ts` | `src/utils/permissions/` (52KB) |
+| [7. Context Management](/en/docs/07-context.md) | `checkAndCompact()` in `agent.ts` | `src/services/compact/` |
 | **Phase 2: Advanced Capabilities** | | |
 | [8. Memory System](/en/docs/08-memory.md) | `memory.ts` | `src/utils/memory.ts` |
 | [9. Skills System](/en/docs/09-skills.md) | `skills.ts` | `src/utils/skills.ts` + `src/tools/SkillTool/` |
 | [10. Plan Mode](/en/docs/10-plan-mode.md) | `agent.ts` + `tools.ts` + `cli.ts` | `EnterPlanMode` / `ExitPlanMode` |
 | [11. Multi-Agent](/en/docs/11-multi-agent.md) | `subagent.ts` + `agent.ts` | `src/tools/AgentTool/` |
 | [12. MCP Integration](/en/docs/12-mcp.md) | `mcp.ts` | `src/services/mcpClient.ts` |
-| [13. Architecture Comparison](/en/docs/13-whats-next.md) | Full comparison | Full comparison |
+| [13. Architecture Comparison](/en/docs/13-whats-next.md) | global comparison | global comparison |
+| **Phase 3: Autonomous Operation** | | |
+| [15. Autonomy & Continuation](/en/docs/15-autonomy.md) | `autonomy.ts` | `/goal` · `/loop` · Auto Mode |
 
 ---
 
-> **Next chapter**: Let's start with the most critical part -- the Agent Loop, the heart of the entire coding agent.
+> **Next chapter**: start from the dumbest loop — a `while` that only chats — and turn it, step by step, into an agent that gets work done.
