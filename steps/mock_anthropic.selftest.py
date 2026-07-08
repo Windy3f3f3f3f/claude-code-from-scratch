@@ -15,9 +15,12 @@ os.environ.pop("http_proxy", None); os.environ.pop("https_proxy", None); os.envi
 import anthropic  # noqa: E402
 from mock_anthropic import start_mock  # noqa: E402
 
+# Three turns because this selftest makes three independent calls against one
+# mock (create, stream, stream); the mock counts requests per track.
 scenario = {"id": "selftest", "turns": [
     {"tools": [{"name": "read_file", "input": {"file_path": "x.txt"}}]},
     {"text": "all done reading the file"},
+    {"tools": [{"name": "read_file", "input": {"file_path": "x.txt"}}]},
 ]}
 
 fails = []

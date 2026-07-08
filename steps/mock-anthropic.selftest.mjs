@@ -6,11 +6,14 @@
 import { startMock } from "./mock-anthropic.mjs";
 import Anthropic from "@anthropic-ai/sdk";
 
+// Three turns because this selftest makes three independent calls against one
+// mock (create, create, stream); the mock counts requests per track.
 const scenario = {
   id: "selftest",
   turns: [
     { tools: [{ name: "read_file", input: { file_path: "x.txt" } }] },
     { text: "done reading" },
+    { tools: [{ name: "read_file", input: { file_path: "x.txt" } }] },
   ],
 };
 

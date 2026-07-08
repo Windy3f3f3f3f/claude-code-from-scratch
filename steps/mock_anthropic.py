@@ -54,9 +54,12 @@ def _stream_body(msg):
 
 
 def start_mock(scenario, log_path=None):
-    """Start the mock in a daemon thread. Returns (url, close)."""
-    turns = (scenario or {}).get("turns", [])
-    state = {"req": 0}
+    """Start the mock in a daemon thread. Returns (url, close). A scenario is
+    flat ({turns}) or multi-track ({tracks: {main:{turns}, compact:{match,turns}}});
+    requests route to a track by a substring its `match` finds in the system
+    prompt (default "main"), each track with its own counter."""
+    tracks = (scenario or {}).get("tracks") or {"main": {"turns": (scenario or {}).get("turns", [])}}
+    state = {"req": 0, "counters": {}}
 
     def log(obj):
         if log_path:
@@ -69,12 +72,20 @@ def start_mock(scenario, log_path=None):
                 self.send_response(404); self.end_headers(); self.wfile.write(b"not found"); return
             body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
             req_index = state["req"]
-            assistant_count = sum(1 for m in body.get("messages", []) if m.get("role") == "assistant")
-            turn = turns[assistant_count] if assistant_count < len(turns) else None
 
             sys_text = body.get("system", "")
             if isinstance(sys_text, list):
                 sys_text = "".join(b.get("text", "") for b in sys_text)
+            # Route to a track by its `match` substring; default "main".
+            track = "main"
+            for name, t in tracks.items():
+                if t.get("match") and t["match"] in sys_text:
+                    track = name
+                    break
+            turn_index = state["counters"].get(track, 0)
+            track_turns = tracks.get(track, {}).get("turns", [])
+            turn = track_turns[turn_index] if turn_index < len(track_turns) else None
+
             # tool_result blocks the agent sent back — proof the tool actually
             # ran, with its real output.
             tool_results = []
@@ -87,17 +98,18 @@ def start_mock(scenario, log_path=None):
                                                  "content": c if isinstance(c, str) else json.dumps(c)})
             first_user = next((m for m in body.get("messages", []) if m.get("role") == "user"), None)
             first_user_text = first_user["content"] if first_user and isinstance(first_user.get("content"), str) else ""
-            log({"type": "request", "req": req_index, "turnIndex": assistant_count,
+            log({"type": "request", "req": req_index, "track": track, "turnIndex": turn_index,
                  "system": sys_text, "tools": [t["name"] for t in body.get("tools", [])],
                  "toolResults": tool_results, "messageCount": len(body.get("messages", [])),
                  "firstUserText": first_user_text, "stream": bool(body.get("stream"))})
 
             if turn is None:
-                log({"type": "exhausted", "req": req_index, "turnIndex": assistant_count})
+                log({"type": "exhausted", "req": req_index, "track": track, "turnIndex": turn_index})
                 err = json.dumps({"type": "error", "error": {"type": "mock_exhausted",
-                      "message": f"no turn {assistant_count} (only {len(turns)})"}}).encode()
+                      "message": f'track "{track}" has no turn {turn_index}'}}).encode()
                 self.send_response(500); self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(err))); self.end_headers(); self.wfile.write(err); return
+            state["counters"][track] = turn_index + 1
 
             msg = _message_from_turn(turn, body.get("model", "mock"), req_index)
             log({"type": "response", "req": req_index, "stop_reason": msg["stop_reason"],

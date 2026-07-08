@@ -61,8 +61,15 @@ async function writeStreaming(res, msg) {
 }
 
 // Start the mock. Returns { url, close, port }.
+// A scenario is either flat ({turns}) — one "main" track — or multi-track
+// ({tracks: {main: {turns}, compact: {match, turns}, ...}}). Each request is
+// routed to a track by a substring its `match` finds in the system prompt (so an
+// aux call like compaction can be told apart from the main loop); "main" is the
+// fallback. Each track has its own request counter, so aux calls don't disturb
+// the main loop's turn index.
 export function startMock({ scenario, logPath } = {}) {
-  const turns = scenario?.turns || [];
+  const tracks = scenario?.tracks || { main: { turns: scenario?.turns || [] } };
+  const counters = {};
   let reqIndex = 0;
 
   const server = createServer((req, res) => {
@@ -75,8 +82,14 @@ export function startMock({ scenario, logPath } = {}) {
       let body;
       try { body = JSON.parse(raw); } catch { res.writeHead(400); res.end("bad json"); return; }
 
-      const assistantCount = (body.messages || []).filter((m) => m.role === "assistant").length;
-      const turn = turns[assistantCount];
+      const system = typeof body.system === "string" ? body.system : (Array.isArray(body.system) ? body.system.map((b) => b.text).join("") : "");
+      // Route to a track by its `match` substring; default "main".
+      let track = "main";
+      for (const [name, t] of Object.entries(tracks)) {
+        if (t.match && system.includes(t.match)) { track = name; break; }
+      }
+      const turnIndex = counters[track] || 0;
+      const turn = (tracks[track]?.turns || [])[turnIndex];
 
       // tool_result blocks the agent sent back — proof the tool actually ran,
       // with its real output (a broken tool shows up here as wrong content).
@@ -90,8 +103,9 @@ export function startMock({ scenario, logPath } = {}) {
         appendFileSync(logPath, JSON.stringify({
           type: "request",
           req: reqIndex,
-          turnIndex: assistantCount,
-          system: typeof body.system === "string" ? body.system : (Array.isArray(body.system) ? body.system.map((b) => b.text).join("") : ""),
+          track,
+          turnIndex,
+          system,
           tools: (body.tools || []).map((t) => t.name),
           toolResults,
           messageCount: (body.messages || []).length,
@@ -102,10 +116,11 @@ export function startMock({ scenario, logPath } = {}) {
 
       // Queue exhausted: fail loudly. A false green is worse than a red test.
       if (!turn) {
-        const err = { type: "error", error: { type: "mock_exhausted", message: `mock scenario has no turn ${assistantCount} (only ${turns.length})` } };
-        if (logPath) appendFileSync(logPath, JSON.stringify({ type: "exhausted", req: reqIndex, turnIndex: assistantCount }) + "\n");
+        const err = { type: "error", error: { type: "mock_exhausted", message: `mock track "${track}" has no turn ${turnIndex}` } };
+        if (logPath) appendFileSync(logPath, JSON.stringify({ type: "exhausted", req: reqIndex, track, turnIndex }) + "\n");
         res.writeHead(500, { "content-type": "application/json" }); res.end(JSON.stringify(err)); return;
       }
+      counters[track] = turnIndex + 1;
 
       const msg = messageFromTurn(turn, body.model || "mock", reqIndex);
       if (logPath) appendFileSync(logPath, JSON.stringify({
