@@ -27,6 +27,10 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     if (saved) { agent.loadHistory(saved as any); console.log(`(resumed ${saved.length} messages)`); }
   }
 //#endstep
+//#step >=10
+  // --plan: read-only mode. The agent may read and think, but not write or run shell.
+  if (argv.includes("--plan")) { agent.setMode("plan"); argv = argv.filter((a) => a !== "--plan"); console.log("(plan mode: read-only)"); }
+//#endstep
 
   const oneShot = argv.join(" ").trim();
   if (oneShot) {

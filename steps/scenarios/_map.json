@@ -105,5 +105,17 @@
       "firstUserContains": "commit message",
       "finalStopReason": "end_turn"
     }
+  },
+  "10": {
+    "scenario": "plan-blocks-write",
+    "expect": {
+      "toolCalls": [
+        "write_file"
+      ],
+      "toolResultsContain": [
+        "plan mode"
+      ],
+      "finalStopReason": "end_turn"
+    }
   }
 }

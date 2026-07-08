@@ -27,7 +27,55 @@ graph TB
     style Manual fill:#ffe0e0
 ```
 
+> ▶ **Run this chapter**: `node steps/run.mjs 10` (no API key) — watch a write get blocked under `--plan`. Add `--diff` to see what it added over the previous chapter.
+
 ## Our Implementation
+
+Sometimes you don't want the agent touching code right away — you want to see the plan and approve first. This chapter builds Plan Mode: a read-only mode where, under `--plan`, the agent can read and think but every write or shell call is blocked — enforced by the same permission gate from Chapter 6, plus one rule "no writes in plan mode". Relative to last chapter, the agent gains a `mode` and one extra check before running a tool:
+
+<!-- @diff file=agent.ts step=10 lang=ts -->
+```diff
+@@ -13,4 +13,5 @@ export class Agent {
+   private client: Anthropic;
+   private messages: Anthropic.MessageParam[] = [];
++  mode = "default"; // "plan" makes the agent read-only
+ 
+   constructor() {
+@@ -64,7 +65,9 @@ export class Agent {
+       for (const tu of toolUses) {
+         console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
+-        // Check permission before running the tool; a denied call never runs.
+-        const output = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
+-          ? `Denied: ${tu.name} was blocked by the permission system.`
++        // Plan mode is read-only: writes and shell are denied on top of the gate.
++        const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
++          || (this.mode === "plan" && (tu.name === "write_file" || tu.name === "edit_file" || tu.name === "run_shell"));
++        const output = blocked
++          ? `Denied: ${tu.name} was blocked (${this.mode} mode).`
+           : await executeTool(tu.name, tu.input as Record<string, any>);
+         results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
+@@ -78,3 +81,4 @@ export class Agent {
+   loadHistory(messages: Anthropic.MessageParam[]): void { this.messages = messages; }
+   clearHistory(): void { this.messages = []; }
++  setMode(m: string): void { this.mode = m; }
+ }
+```
+<!-- @enddiff -->
+
+Run it: under `--plan` the model wants to write `report.txt`, but the gate blocks it as "plan mode", so nothing is written:
+
+<!-- @transcript step=10 lang=ts -->
+```
+$ node steps/run.mjs 10
+▶ step 10 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude --plan Create a file report.txt with the plan.
+
+(plan mode: read-only)
+I'll write the plan.
+  → write_file({"file_path":"report.txt","content":"the plan"})
+That was blocked because we're in plan (read-only) mode.
+```
+<!-- @endtranscript -->
 
 ### Tool Definitions
 

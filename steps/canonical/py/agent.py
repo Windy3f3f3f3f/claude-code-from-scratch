@@ -40,6 +40,9 @@ class Agent:
             kwargs["base_url"] = os.environ["ANTHROPIC_BASE_URL"]
         self.client = anthropic.Anthropic(**kwargs)
         self.messages: list = []
+#step >=10
+        self.mode = "default"  # "plan" makes the agent read-only
+#endstep
 
     # One user turn. Call the model; if it asks for tools, run them and feed the
     # results back; repeat until it answers with plain text.
@@ -91,6 +94,12 @@ class Agent:
             results = []
             for tu in tool_uses:
                 print(f"  → {tu.name}({json.dumps(tu.input)})")
+#step >=10
+                # Plan mode is read-only: writes and shell are denied on top of the gate.
+                blocked = check_permission(tu.name, tu.input) == "deny" or (
+                    self.mode == "plan" and tu.name in ("write_file", "edit_file", "run_shell"))
+                output = f"Denied: {tu.name} was blocked ({self.mode} mode)." if blocked \
+                    else execute_tool(tu.name, tu.input)
 #step >=6
                 # Check permission before running the tool; a denied call never runs.
                 if check_permission(tu.name, tu.input) == "deny":
@@ -113,4 +122,8 @@ class Agent:
 
     def clear_history(self) -> None:
         self.messages = []
+#endstep
+#step >=10
+    def set_mode(self, m: str) -> None:
+        self.mode = m
 #endstep

@@ -33,6 +33,7 @@ const STEP_INFO = {
   7: "context — when the history grows too long, older messages are summarized (compacted)",
   8: "memory — recall facts saved across sessions and inject them into the prompt",
   9: "skills — /name runs a reusable prompt template loaded from a file",
+  10: "plan mode — --plan makes the agent read-only; writes and shell are denied",
 };
 
 const args = process.argv.slice(2);

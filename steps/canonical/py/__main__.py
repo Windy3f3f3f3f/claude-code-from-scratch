@@ -31,6 +31,13 @@ def main(argv=None) -> None:
             agent.load_history(saved)
             print(f"(resumed {len(saved)} messages)")
 #endstep
+#step >=10
+    # --plan: read-only mode. The agent may read and think, but not write or run shell.
+    if "--plan" in argv:
+        agent.set_mode("plan")
+        argv = [a for a in argv if a != "--plan"]
+        print("(plan mode: read-only)")
+#endstep
 
     one_shot = " ".join(argv).strip()
     if one_shot:

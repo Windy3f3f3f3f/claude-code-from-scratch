@@ -27,7 +27,55 @@ graph TB
     style Manual fill:#ffe0e0
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 10`（无需 API key）——看 `--plan` 下写文件被拦。加 `--diff` 看它比上一章多了什么。
+
 ## 我们的实现
+
+有时候不想让 agent 一上来就改代码，想先看看它打算怎么干、批准了再动手。这一章造 Plan Mode：一个只读模式，`--plan` 下 agent 能读能想，但写文件、跑 shell 全被拦下——靠的正是第 6 章那道权限闸，多加一条「plan 模式禁写」。相对上一章，agent 多了个 `mode`，执行工具前多判一次：
+
+<!-- @diff file=agent.ts step=10 lang=ts -->
+```diff
+@@ -13,4 +13,5 @@ export class Agent {
+   private client: Anthropic;
+   private messages: Anthropic.MessageParam[] = [];
++  mode = "default"; // "plan" makes the agent read-only
+ 
+   constructor() {
+@@ -64,7 +65,9 @@ export class Agent {
+       for (const tu of toolUses) {
+         console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
+-        // Check permission before running the tool; a denied call never runs.
+-        const output = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
+-          ? `Denied: ${tu.name} was blocked by the permission system.`
++        // Plan mode is read-only: writes and shell are denied on top of the gate.
++        const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
++          || (this.mode === "plan" && (tu.name === "write_file" || tu.name === "edit_file" || tu.name === "run_shell"));
++        const output = blocked
++          ? `Denied: ${tu.name} was blocked (${this.mode} mode).`
+           : await executeTool(tu.name, tu.input as Record<string, any>);
+         results.push({ type: "tool_result", tool_use_id: tu.id, content: output });
+@@ -78,3 +81,4 @@ export class Agent {
+   loadHistory(messages: Anthropic.MessageParam[]): void { this.messages = messages; }
+   clearHistory(): void { this.messages = []; }
++  setMode(m: string): void { this.mode = m; }
+ }
+```
+<!-- @enddiff -->
+
+跑一下，`--plan` 下模型想写 `report.txt`，闸门以「plan mode」为由拦下，什么都没写：
+
+<!-- @transcript step=10 lang=ts -->
+```
+$ node steps/run.mjs 10
+▶ step 10 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude --plan Create a file report.txt with the plan.
+
+(plan mode: read-only)
+I'll write the plan.
+  → write_file({"file_path":"report.txt","content":"the plan"})
+That was blocked because we're in plan (read-only) mode.
+```
+<!-- @endtranscript -->
 
 ### 工具定义
 

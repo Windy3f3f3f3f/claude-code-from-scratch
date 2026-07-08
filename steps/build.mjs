@@ -29,6 +29,7 @@ const STEPS = [
   { n: 7, name: "07-context" },
   { n: 8, name: "08-memory" },
   { n: 9, name: "09-skills" },
+  { n: 10, name: "10-plan-mode" },
 ];
 
 // Each file, and the first step at which it exists.

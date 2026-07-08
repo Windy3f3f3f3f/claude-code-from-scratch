@@ -1,0 +1,28 @@
+{
+  "id": "plan-blocks-write",
+  "runs": [
+    {
+      "argv": [
+        "--plan",
+        "Create a file report.txt with the plan."
+      ]
+    }
+  ],
+  "turns": [
+    {
+      "text": "I'll write the plan.",
+      "tools": [
+        {
+          "name": "write_file",
+          "input": {
+            "file_path": "report.txt",
+            "content": "the plan"
+          }
+        }
+      ]
+    },
+    {
+      "text": "That was blocked because we're in plan (read-only) mode."
+    }
+  ]
+}

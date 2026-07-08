@@ -27,6 +27,9 @@ const SYSTEM_PROMPT =
 export class Agent {
   private client: Anthropic;
   private messages: Anthropic.MessageParam[] = [];
+//#step >=10
+  mode = "default"; // "plan" makes the agent read-only
+//#endstep
 
   constructor() {
     this.client = new Anthropic({
@@ -94,6 +97,13 @@ export class Agent {
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const tu of toolUses) {
         console.log(`  → ${tu.name}(${JSON.stringify(tu.input)})`);
+//#step >=10
+        // Plan mode is read-only: writes and shell are denied on top of the gate.
+        const blocked = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
+          || (this.mode === "plan" && (tu.name === "write_file" || tu.name === "edit_file" || tu.name === "run_shell"));
+        const output = blocked
+          ? `Denied: ${tu.name} was blocked (${this.mode} mode).`
+          : await executeTool(tu.name, tu.input as Record<string, any>);
 //#step >=6
         // Check permission before running the tool; a denied call never runs.
         const output = checkPermission(tu.name, tu.input as Record<string, any>) === "deny"
@@ -113,5 +123,8 @@ export class Agent {
   history(): Anthropic.MessageParam[] { return this.messages; }
   loadHistory(messages: Anthropic.MessageParam[]): void { this.messages = messages; }
   clearHistory(): void { this.messages = []; }
+//#endstep
+//#step >=10
+  setMode(m: string): void { this.mode = m; }
 //#endstep
 }
