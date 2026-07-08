@@ -2,7 +2,7 @@
 
 ## Chapter Goals
 
-Cram a big task into one agent and the context fills up fast. This chapter builds sub-agents so the main agent can farm work out.
+Plan Mode makes the agent plan before acting, but no amount of planning gets around one thing: cram a big task into one agent and the context fills up fast. This chapter builds sub-agents so the main agent can farm work out.
 
 The main agent spawns an independent sub-agent to chew on a sub-task — exploring code, planning, or general work. The sub-agent has its own clean context and brings back only the result, instead of pouring all the intermediate steps back into the main conversation. That's divide and conquer, and it's the way out when the main agent's context runs short.
 
@@ -51,7 +51,7 @@ With **~199 lines** in `subagent.ts` plus minor changes to the Agent class, we i
 export type SubAgentType = "explore" | "plan" | "general";
 
 const READ_ONLY_TOOLS = new Set([
-  "read_file", "list_files", "grep_search", "run_shell"
+  "read_file", "list_files", "grep_search"
 ]);
 
 function getReadOnlyTools(): ToolDef[] {
@@ -67,7 +67,7 @@ def _get_read_only_tools() -> list[ToolDef]:
 ```
 <!-- tabs:end -->
 
-Why is `run_shell` in the "read-only" tool set? Read-only commands like `git log`, `find`, and `wc` are essential for code exploration; completely prohibiting shell would severely weaken Explore's capabilities. Safety is ensured through system prompt constraints:
+Why no shell at all? Explore only does code exploration, and `read_file`, `list_files`, and `grep_search` are enough — so we simply don't include `run_shell`, cutting off any chance of a destructive command at the tool layer, which is safer than a prompt reminding it to "only run read-only commands." The system prompt restates the read-only contract too:
 
 <!-- tabs:start -->
 #### **TypeScript**
@@ -75,9 +75,8 @@ Why is `run_shell` in the "read-only" tool set? Read-only commands like `git log
 const EXPLORE_PROMPT = `You are an Explore agent — a fast, READ-ONLY sub-agent...
 
 IMPORTANT CONSTRAINTS:
-- You are READ-ONLY. Do NOT modify any files.
-- If using run_shell, only use read commands (ls, cat, find, grep, git log, etc.)
-- Do NOT use write, edit, rm, mv, or any destructive shell commands.
+- You are READ-ONLY. You only have access to read_file, list_files, and grep_search.
+- Do NOT modify any files.
 
 Be fast and thorough. Use multiple tool calls when possible.
 Return a concise summary of your findings.`;
@@ -562,9 +561,9 @@ Fork-return's advantages are simple: no shared state (impossible to pollute the 
 
 The General Agent's tool list filters out `agent`. Without this restriction, recursive nesting of A creating B, B creating C would consume tokens exponentially -- each level has its own system prompt and message history. Claude Code has the same restriction; in practice, 1 level covers the vast majority of scenarios.
 
-### Why Do Explore/Plan Keep run_shell?
+### Why Do Explore/Plan Get Only Three Read-Only Tools, No Shell?
 
-Read-only shell commands like `git log --oneline -20` and `find . -name "*.ts" | wc -l` are essential for code exploration; completely prohibiting them would severely weaken capabilities. This design aligns with Claude Code's Explore Agent -- constrained via system prompt rather than completely disabling the tool.
+`read_file`, `list_files`, and `grep_search` already cover the vast majority of code exploration. We simply leave out `run_shell`, cutting off any chance of a destructive command at the tool layer — the teaching version takes the safer path. The real Claude Code's Explore Agent does allow read-only shell (`git log`, `find`, `wc` are genuinely useful for exploration), constrained by system prompt to read-only commands; the two approaches trade off differently.
 
 ### Why Use a Buffer to Collect Output Instead of Callbacks?
 

@@ -506,7 +506,7 @@ The key to this design is **non-blocking polling**:
 4. **Marked `consumed = true` after use** -- ensures the same prefetch is only injected once
 
 Three gating conditions avoid wasting API calls:
-- **Multi-word query**: A single word (like "hi") is too short for meaningful semantic matching
+- **Substantial query**: at least 2 CJK (Chinese/Japanese/Korean) characters, or multiple words for space-separated languages; a single word (like "hi") is too short for meaningful semantic matching
 - **Session budget**: Stops recall after exceeding 60KB cumulative, preventing context overload
 - **Memory existence**: Skips when no memory files exist, saving an API call
 

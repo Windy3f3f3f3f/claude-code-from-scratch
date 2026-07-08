@@ -27,7 +27,7 @@ graph TB
 
 ## 配置格式
 
-用户只需在配置文件中声明 MCP 服务器，Agent 启动时自动连接：
+用户只需在配置文件中声明 MCP 服务器，Agent 会在首次 chat 时自动连接并注册它们的工具：
 
 ```json
 // ~/.claude/settings.json（用户级）或 .claude/settings.json（项目级）
@@ -53,7 +53,7 @@ graph TB
 
 ## 我们的实现
 
-用 **~266 行** 的 `mcp.ts` 实现完整的 MCP 客户端，无任何 SDK 依赖。
+用 **~277 行** 的 `mcp.ts` 实现完整的 MCP 客户端，无任何 SDK 依赖。
 
 | Claude Code | 我们的实现 | 简化原因 |
 |-------------|-----------|---------|
@@ -331,7 +331,7 @@ if (!this.mcpInitialized && !this.isSubAgent) {
 三个设计决策：
 
 1. **懒加载**（首次 chat 时，而非构造函数里）：用户可能只是想问个快问题，不需要付 MCP 连接的启动成本
-2. **只在主 Agent 加载**：子 Agent 继承主 Agent 的工具列表，不需要重复连接
+2. **只在主 Agent 加载**：MCP 工具是运行时追加到主 Agent 的；普通子 Agent 用的是自己配置里的工具集，不连接 MCP、也不继承这些工具
 3. **失败不崩溃**：MCP 连接失败只输出日志，Agent 继续用内置工具工作
 
 #### 工具调用路由

@@ -10,11 +10,11 @@ Starting from Chapter 1's chat-only loop, we've built all the way up to an agent
 | Component | Claude Code | mini-claude | Difference |
 |-----------|------------|-------------|------------|
 | **Agent Loop** | 7 continue reasons | Only checks tool_use | Simplified loop control |
-| **Tool count** | 66+ tools | 13 tools (6 core + web_fetch + tool_search + skill + agent + 2 plan mode) | Removed specialized tools |
+| **Tool count** | 66+ tools | 12 resident tools (6 core + web_fetch + tool_search + skill + agent + 2 plan mode), plus `schedule_wakeup` temporarily during `/loop` dynamic | Removed specialized tools |
 | **Tool execution** | Concurrent execution + streaming early start | Parallel execution + streaming early start | Architecture aligned |
 | **API backend** | Anthropic only | Anthropic + OpenAI compatible | Added OpenAI |
 | **System Prompt** | static/dynamic split + API caching | static/dynamic split + cache_control breakpoint | Architecture aligned |
-| **Permission system** | 7 layers + AST analysis + 8-level rule sources | 5 modes + rule config + regex + confirmation | Layer alignment |
+| **Permission system** | 7 layers + AST analysis + 8-level rule sources | 6 modes + rule config + regex + confirmation/Auto classifier | Layer alignment |
 | **Context management** | 4-level compression pipeline | 4 layers (budget + snip + microcompact + summary) | Architecture aligned |
 | **Memory system** | 4 types + semantic recall + MEMORY.md index | 4 types + semantic recall + MEMORY.md + async prefetch | Architecture aligned |
 | **Skills system** | 6 sources + lazy loading + inline/fork | 2 sources + preloading + inline/fork | Removed advanced loading |
@@ -36,7 +36,7 @@ Starting from Chapter 1's chat-only loop, we've built all the way up to an agent
 | `src/memory.ts` | `python/mini_claude/memory.py` | `src/utils/memory.ts` + system prompt injection | Memory system |
 | `src/skills.ts` | `python/mini_claude/skills.py` | `src/utils/skills.ts` + `src/tools/SkillTool/` | Skills system |
 | `src/subagent.ts` | `python/mini_claude/subagent.py` | `src/tools/AgentTool/` (built-in types) | Sub-agent type configuration |
-| `src/mcp.ts` | `python/mini_claude/mcp.py` | `src/services/mcpClient.ts` | MCP client |
+| `src/mcp.ts` | `python/mini_claude/mcp_client.py` | `src/services/mcpClient.ts` | MCP client |
 
 ## What We Didn't Implement
 
@@ -72,7 +72,7 @@ Prompt Caching has now been added the way Claude Code does it; details are in [C
 
 ### The Autonomy Trio (Done)
 
-`/goal`, `/loop`, and Auto Mode have also been added; details are in [Chapter 15: Autonomy & Continuation](/en/docs/15-autonomy.md). They let the agent keep moving across many turns with nobody watching: `/goal` chases a stopping condition with an independent evaluator until it is met or judged impossible, `/loop` lets the main model schedule its next run on an interval or at a self-chosen pace, and Auto Mode replaces the confirmation prompt for dangerous actions with a classifier that reads a reasoning-blind transcript. The prompts are quoted verbatim from the leaked binary; a few teaching simplifications are made along the way (single-stage classifier, an in-session timer instead of KAIROS) -- the "Extension Directions" further down that originally sketched such capabilities can be read against Chapter 15 to see how far they are now realized.
+`/goal`, `/loop`, and Auto Mode have also been added; details are in [Chapter 15: Autonomy & Continuation](/en/docs/15-autonomy.md). They let the agent keep moving across many turns with nobody watching: `/goal` chases a stopping condition with an independent evaluator until it is met or judged impossible, `/loop` lets the main model schedule its next run on an interval or at a self-chosen pace, and Auto Mode replaces the confirmation prompt for dangerous actions with a classifier that reads a reasoning-blind transcript. The prompts are quoted verbatim from the leaked binary; a few teaching simplifications are made along the way (the two-stage classification flow is reproduced, minus the real client's stop_sequences / thinking-token details; an in-session timer instead of KAIROS) -- the "Extension Directions" further down that originally sketched such capabilities can be read against Chapter 15 to see how far they are now realized.
 
 ### Phase 2: Extensibility (3-5 days)
 
@@ -194,9 +194,9 @@ Want to dive deeper into the design principles of each Claude Code module? Check
 
 ## Conclusion
 
-~5400 lines of code (TS) / ~5000 lines (Python), 12 files, covering the core components, advanced capabilities, and autonomous operation of a coding agent:
+~5500 lines (TS) / ~5060 lines (Python), 12 TS files + 13 Python files, covering the core components, advanced capabilities, and autonomous operation of a coding agent:
 
-**Phase 1 -- Core Components:** Agent Loop, Tool System (13 tools + mtime protection + lazy loading + parallel execution), System Prompt (Markdown template + @include + environment injection), CLI / Session (REPL + JSON persistence), Streaming Output (Anthropic + OpenAI dual backend + streaming tool execution), Permission Security (5 modes + declarative rules + regex + confirmation), Context Management (4-layer compression + large result persistence)
+**Phase 1 -- Core Components:** Agent Loop, Tool System (12 resident tools + mtime protection + lazy loading + parallel execution), System Prompt (Markdown template + @include + environment injection), CLI / Session (REPL + JSON persistence), Streaming Output (Anthropic + OpenAI dual backend + streaming tool execution), Permission Security (the 5 base modes from Phase 1 + declarative rules + regex + confirmation, with Auto Mode added in Phase 3), Context Management (4-layer compression + large result persistence)
 
 **Phase 2 -- Advanced Capabilities:** Memory System (semantic recall + async prefetch), Skills System (inline/fork dual mode), Plan Mode (read-only planning + 4-option approval), Multi-Agent (Sub-Agent + 3 built-in types + custom), MCP Integration (JSON-RPC over stdio), Budget Control
 
@@ -204,4 +204,4 @@ Want to dive deeper into the design principles of each Claude Code module? Check
 
 A huge amount of the code in Claude Code's 500,000 lines is edge case handling and enterprise-grade reliability. But the core agent capabilities -- understand user intent -> call tools to manipulate code -> iterate until complete -- are exactly what these few thousand lines do.
 
-Now you have a feature-rich coding agent, and you understand the design intent behind every line of code. Go extend it.
+At this point a complete minimal coding agent has taken shape, and the design intent behind every line of its code has been laid out. Further extensions can move forward step by step along the routes above.

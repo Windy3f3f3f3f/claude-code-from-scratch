@@ -27,7 +27,7 @@ Core idea: **spawn child process -> JSON-RPC handshake -> discover tools -> regi
 
 ## Configuration Format
 
-Users only need to declare MCP servers in a configuration file, and the Agent connects automatically on startup:
+Users only need to declare MCP servers in a configuration file, and the Agent connects to them and registers their tools automatically on the first chat:
 
 ```json
 // ~/.claude/settings.json (user-level) or .claude/settings.json (project-level)
@@ -53,7 +53,7 @@ You can also use `.mcp.json` in the project root, with the same format. Servers 
 
 ## Our Implementation
 
-A complete MCP client in **~266 lines** of `mcp.ts`, with zero SDK dependencies.
+A complete MCP client in **~277 lines** of `mcp.ts`, with zero SDK dependencies.
 
 | Claude Code | Our Implementation | Simplification Reason |
 |-------------|-------------------|----------------------|
@@ -331,7 +331,7 @@ if (!this.mcpInitialized && !this.isSubAgent) {
 Three design decisions:
 
 1. **Lazy loading** (on first chat, not in the constructor): The user might just want to ask a quick question and doesn't need to pay the MCP connection startup cost
-2. **Only load in the main Agent**: Sub-agents inherit the main Agent's tool list and don't need to reconnect
+2. **Only load in the main Agent**: MCP tools are appended to the main Agent at runtime; ordinary sub-agents use their own configured tool set, so they neither connect to MCP nor inherit these tools
 3. **Failure doesn't crash**: MCP connection failures only produce log output; the Agent continues working with built-in tools
 
 #### Tool Call Routing

@@ -2,9 +2,9 @@
 
 ## Chapter Goals
 
-Sometimes you don't want the agent touching code right away — you want to see how it plans to proceed and approve first. This chapter builds Plan Mode.
+With tools and skills in place, the agent is increasingly eager to act — but sometimes you don't want it touching code right away; you want to see how it plans to proceed and approve first. This chapter builds Plan Mode.
 
-It's a read-only planning mode: the agent can only read and think, not write files or run shells, and it hands its plan up in a plan file. Then you pick one of four — do it, tweak-then-do, do it yourself, or have it re-plan. The "read-only" part is enforced in code by the permission system from Chapter 6, not a prompt begging the model to behave.
+It's a read-only planning mode: the agent can only read and think, not write files or run shells, and it hands its plan up in a plan file. The approval UI then offers four choices — do it, tweak-then-do, do it manually, or keep planning. The "read-only" part is enforced in code by the permission system from Chapter 6, not a prompt begging the model to behave.
 
 ```mermaid
 graph TB

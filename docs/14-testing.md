@@ -2,7 +2,7 @@
 
 ## 本章目标
 
-整本教程造下来，agent 已经齐活了。这一章不写新代码，用 19 个手动场景把它从头跑一遍，确认每一块——工具、记忆、技能、子 agent、编辑、会话——都真能用。全部手动执行、目视验证，跑在 `--yolo` 模式下（跳过权限确认）。
+整本教程造下来，agent 已经齐活了。这一章不写新代码，用 22 个手动场景把它从头跑一遍，确认每一块——工具、记忆、技能、子 agent、编辑、会话、自治续跑——都真能用。绝大多数跑在 `--yolo` 模式下（跳过权限确认）；自治那三项（Test 20-22）单独一节，Auto Mode 用的是 `--auto`。
 
 ```mermaid
 graph LR
@@ -567,6 +567,61 @@ Use the agent tool with type "reviewer" to review the file src/frontmatter.ts
 
 ---
 
+## Phase 8: 自治与续跑 (Test 20-22)
+
+第 15 章加的三件套要单独验，因为它们跨很多 turn、且 Auto Mode 走的是 `--auto` 而不是 `--yolo`。
+
+### 20. `/goal` 回灌与达成
+
+**测试目标**：验证目标未达成时把原因回灌进下一 turn、达成时清目标停下。
+
+在 REPL 里设一个两三轮内可达成的条件：
+
+```
+/goal 在项目根创建一个 hello.txt，内容是 GOALPROBE
+```
+
+✅ 预期：
+- 设目标后 agent 先简短确认、立刻动手
+- 每 turn 结束由评估器判定；没达成则打印 `condition was not met: <reason>` 并续跑
+- 建好文件、内容匹配后，评估器判 `ok`，打印达成、清掉目标
+- 再设一个不可能条件（如 `/goal 联网下载并安装一个 GUI`），看评估器判 `impossible` 主动刹车，而不是空转到预算耗尽
+
+### 21. `/loop` 两种节奏
+
+**测试目标**：验证 interval 定时重投与 dynamic 自定节奏两条路径。
+
+```
+/loop 1m 检查一次 src/ 有没有新增 .ts 文件
+```
+
+✅ 预期：打印 `Scheduled every 1m (session-only)`，等一个 tick 看到重投一次；Ctrl+C 停。
+
+```
+/loop 把 README 的标题读出来
+```
+
+✅ 预期：dynamic 模式下 agent 判一次即完成、不排下一次 wakeup，干净退出。
+
+### 22. Auto Mode 拦截危险操作
+
+**测试目标**：验证 `--auto` 下只读工具走 fast-path 放行、危险写操作被分类器拦下。
+
+用 `--auto` 启动（**不是 `--yolo`**），先跑一个只读任务（如"列出 src/ 下的文件"）——应直接放行，不弹确认。再让它跑：
+
+```
+git push origin main
+```
+
+✅ 预期：
+- 只读工具（read_file / grep_search 等）走 fast-path，不经分类器
+- `git push origin main` 触发分类器，命中"别 push"规则被拦，打印以规则名开头的 `reason`
+- 分类器输出解析不了时 fail-closed（判成拦截）；连拦到上限退回人工确认
+
+**设计意图**：Auto Mode 用一个读脱敏对话记录的分类器代替危险操作的确认框，让续跑的 turn 不用人工盯着。细节见[第 15 章](15-autonomy.md)。
+
+---
+
 ## 测试完成
 
 ```bash
@@ -587,7 +642,7 @@ bash test/cleanup.sh
 | 4 | 语义记忆召回 | 记忆上下文 | ☐ | ☐ | 保存→新对话→语义查询 |
 | 5 | @include + Rules | 记忆上下文 | ☐ | ☐ | 中文回复 |
 | 6 | Read-before-edit | 记忆上下文 | ☐ | ☐ | 代码层或 prompt 层 |
-| 7 | 大结果持久化 | 记忆上下文 | ☐ | ☐ | 75KB 文件 |
+| 7 | 大结果持久化 | 记忆上下文 | ☐ | ☐ | 约 68KB 大文件 |
 | 8 | Skill 调用 | 技能扩展 | ☐ | ☐ | /greet /commit |
 | 9 | ToolSearch | 技能扩展 | ☐ | ☐ | plan mode 工具 |
 | 10 | REPL 命令 | 技能扩展 | ☐ | ☐ | /cost /memory /compact /plan |
@@ -600,3 +655,6 @@ bash test/cleanup.sh
 | 17 | Grep Search | 编辑搜索 | ☐ | ☐ | 正则搜索 + include |
 | 18 | Write File | 编辑搜索 | ☐ | ☐ | 新文件 + 自动建目录 |
 | 19 | 自定义 Agent | 扩展系统 | ☐ | ☐ | .claude/agents/ 定义 |
+| 20 | `/goal` 回灌与达成 | 自治续跑 | ☐ | ☐ | 未达成回灌 + impossible 刹车 |
+| 21 | `/loop` 两种节奏 | 自治续跑 | ☐ | ☐ | interval 定时 + dynamic 收敛 |
+| 22 | Auto Mode 拦截 | 自治续跑 | ☐ | ☐ | `--auto`，拦 git push |

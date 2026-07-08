@@ -2,7 +2,7 @@
 
 ## Chapter Goals
 
-With the whole tutorial built, the agent is complete. This chapter writes no new code — it runs the agent end to end through 19 manual scenarios to confirm every piece works: tools, memory, skills, sub-agents, editing, sessions. All manual execution and visual verification, in `--yolo` mode (skipping permission confirmations).
+With the whole tutorial built, the agent is complete. This chapter writes no new code — it runs the agent end to end through 22 manual scenarios to confirm every piece works: tools, memory, skills, sub-agents, editing, sessions, autonomous continuation. Most run in `--yolo` mode (skipping permission confirmations); the three autonomy scenarios (Test 20-22) get their own section, and Auto Mode uses `--auto`.
 
 ```mermaid
 graph LR
@@ -567,6 +567,61 @@ Pass criteria:
 
 ---
 
+## Phase 8: Autonomy & Continuation (Test 20-22)
+
+The trio added in Chapter 15 needs its own verification, because these run across many turns and Auto Mode uses `--auto` rather than `--yolo`.
+
+### 20. `/goal` Reinjection and Completion
+
+**Test goal**: verify that an unmet condition is reinjected into the next turn, and that the goal is cleared and stopped once met.
+
+In the REPL, set a condition reachable within a couple of turns:
+
+```
+/goal Create a hello.txt in the project root with the content GOALPROBE
+```
+
+✅ Expected:
+- After setting the goal, the agent briefly acknowledges, then starts working immediately
+- Each turn is judged by the evaluator; if unmet, it prints `condition was not met: <reason>` and continues
+- Once the file exists with matching content, the evaluator returns `ok`, prints completion, and clears the goal
+- Then set an impossible condition (e.g. `/goal Download and install a GUI over the network`) and watch the evaluator return `impossible` and brake on its own, rather than spinning until the budget runs out
+
+### 21. `/loop` Two Cadences
+
+**Test goal**: verify both the interval (timed re-submit) and dynamic (self-paced) paths.
+
+```
+/loop 1m Check whether src/ has any new .ts files
+```
+
+✅ Expected: prints `Scheduled every 1m (session-only)`; wait one tick to see it re-submit once; Ctrl+C to stop.
+
+```
+/loop Read out the README's title
+```
+
+✅ Expected: in dynamic mode the agent judges once, completes, schedules no next wakeup, and exits cleanly.
+
+### 22. Auto Mode Blocks a Dangerous Operation
+
+**Test goal**: verify that under `--auto`, read-only tools pass via the fast-path while a dangerous write operation is blocked by the classifier.
+
+Start with `--auto` (**not `--yolo`**), first run a read-only task (like "list the files under src/") — it should pass straight through with no confirmation prompt. Then have it run:
+
+```
+git push origin main
+```
+
+✅ Expected:
+- Read-only tools (read_file / grep_search, etc.) take the fast-path, skipping the classifier
+- `git push origin main` triggers the classifier, hits a "don't push" rule, and is blocked with a `reason` that starts with the rule name
+- When the classifier output can't be parsed, it fails closed (treated as a block); hitting the denial limit falls back to manual confirmation
+
+**Design intent**: Auto Mode replaces the confirmation prompt for dangerous operations with a classifier that reads a reasoning-blind transcript, so continuation turns don't need someone watching. Details are in [Chapter 15](15-autonomy.md).
+
+---
+
 ## Testing Complete
 
 ```bash
@@ -587,7 +642,7 @@ Cleans up all test-generated files (MCP config, skills, rules, memory files, cus
 | 4 | Semantic memory recall | Memory & context | ☐ | ☐ | Save -> new conversation -> semantic query |
 | 5 | @include + Rules | Memory & context | ☐ | ☐ | Chinese response |
 | 6 | Read-before-edit | Memory & context | ☐ | ☐ | Code layer or prompt layer |
-| 7 | Large result persistence | Memory & context | ☐ | ☐ | 75KB file |
+| 7 | Large result persistence | Memory & context | ☐ | ☐ | ~68KB file |
 | 8 | Skill invocation | Skills & extensions | ☐ | ☐ | /greet /commit |
 | 9 | ToolSearch | Skills & extensions | ☐ | ☐ | Plan mode tools |
 | 10 | REPL commands | Skills & extensions | ☐ | ☐ | /cost /memory /compact /plan |
@@ -600,3 +655,6 @@ Cleans up all test-generated files (MCP config, skills, rules, memory files, cus
 | 17 | Grep Search | Editing & search | ☐ | ☐ | Regex search + include |
 | 18 | Write File | Editing & search | ☐ | ☐ | New file + auto directory creation |
 | 19 | Custom Agent | Extension system | ☐ | ☐ | .claude/agents/ definition |
+| 20 | `/goal` reinjection & completion | Autonomy | ☐ | ☐ | unmet reinjection + impossible brake |
+| 21 | `/loop` two cadences | Autonomy | ☐ | ☐ | interval timer + dynamic convergence |
+| 22 | Auto Mode blocking | Autonomy | ☐ | ☐ | `--auto`, blocks git push |
