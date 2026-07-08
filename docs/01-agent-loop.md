@@ -104,12 +104,13 @@ async chat(userText: string): Promise<void> {
   this.messages.push({ role: "user", content: userText });
 
   while (true) {
+    let system = SYSTEM_PROMPT;
     // Build the request once. Passing `tools` is the one line that makes the
     // model tool-aware. Chapter 5 turns the call itself into a stream.
     const request = {
       model: MODEL,
       max_tokens: 4096,
-      system: SYSTEM_PROMPT,
+      system,
       tools: toolDefinitions,
       messages: this.messages,
     };
@@ -148,8 +149,8 @@ def chat(self, user_text: str) -> None:
     self.messages.append({"role": "user", "content": user_text})
 
     while True:
-        kwargs = dict(model=MODEL, max_tokens=4096, tools=tool_definitions, messages=self.messages)
-        kwargs["system"] = SYSTEM_PROMPT
+        system = SYSTEM_PROMPT
+        kwargs = dict(model=MODEL, max_tokens=4096, system=system, tools=tool_definitions, messages=self.messages)
 
         reply = self.client.messages.create(**kwargs)
         for block in reply.content:

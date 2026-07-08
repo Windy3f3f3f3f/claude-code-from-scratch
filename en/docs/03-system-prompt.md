@@ -46,13 +46,13 @@ Last chapter's agent still used a hard-coded one-line system prompt. This chapte
 -  "tasks. Use the tools to read and change files. Keep answers short.";
  
  // The whole agent is one class holding a growing message array and a loop.
-@@ -35,5 +31,5 @@ export class Agent {
-         model: MODEL,
-         max_tokens: 4096,
--        system: SYSTEM_PROMPT,
-+        system: buildSystemPrompt(),
-         tools: toolDefinitions,
-         messages: this.messages,
+@@ -30,5 +26,5 @@ export class Agent {
+ 
+     while (true) {
+-      let system = SYSTEM_PROMPT;
++      let system = buildSystemPrompt();
+       // Build the request once. Passing `tools` is the one line that makes the
+       // model tool-aware. Chapter 5 turns the call itself into a stream.
 ```
 <!-- @enddiff -->
 

@@ -35,7 +35,7 @@ graph LR
 
 <!-- @diff file=agent.ts step=5 lang=ts -->
 ```diff
-@@ -36,8 +36,9 @@ export class Agent {
+@@ -37,8 +37,9 @@ export class Agent {
        };
  
 -      const reply = await this.client.messages.create(request);

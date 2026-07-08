@@ -35,7 +35,7 @@ Last chapter the agent called the model and waited for the whole reply (`message
 
 <!-- @diff file=agent.ts step=5 lang=ts -->
 ```diff
-@@ -36,8 +36,9 @@ export class Agent {
+@@ -37,8 +37,9 @@ export class Agent {
        };
  
 -      const reply = await this.client.messages.create(request);

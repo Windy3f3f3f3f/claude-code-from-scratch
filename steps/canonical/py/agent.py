@@ -13,6 +13,9 @@ from permissions import check_permission
 #step >=7
 from context import maybe_compact
 #endstep
+#step >=8
+from memory import recall_memories
+#endstep
 
 MODEL = os.environ.get("MINI_MODEL", "claude-sonnet-4-5-20250929")
 
@@ -49,12 +52,16 @@ class Agent:
             # Before each model call, compact the history if it has grown too long.
             self.messages = maybe_compact(self.messages, self.client, MODEL)
 #endstep
-            kwargs = dict(model=MODEL, max_tokens=4096, tools=tool_definitions, messages=self.messages)
 #step >=3
-            kwargs["system"] = build_system_prompt()
+            system = build_system_prompt()
 #step <=2
-            kwargs["system"] = SYSTEM_PROMPT
+            system = SYSTEM_PROMPT
 #endstep
+#step >=8
+            # Recall memories relevant to what the user just asked, into the prompt.
+            system += recall_memories(user_text)
+#endstep
+            kwargs = dict(model=MODEL, max_tokens=4096, system=system, tools=tool_definitions, messages=self.messages)
 
 #step >=5
             # Stream the reply so text shows up as it is generated, then collect

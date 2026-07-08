@@ -89,5 +89,13 @@
       ],
       "finalStopReason": "end_turn"
     }
+  },
+  "8": {
+    "scenario": "recall-memory",
+    "expect": {
+      "toolCalls": [],
+      "systemContains": "staging.example.com",
+      "finalStopReason": "end_turn"
+    }
   }
 }

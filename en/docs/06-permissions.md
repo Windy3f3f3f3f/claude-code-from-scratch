@@ -46,7 +46,7 @@ Last chapter's agent ran whatever tool the model asked for, no questions asked â
 +import { checkPermission } from "./permissions.js";
  
  const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
-@@ -56,5 +57,8 @@ export class Agent {
+@@ -57,5 +58,8 @@ export class Agent {
        for (const tu of toolUses) {
          console.log(`  â†’ ${tu.name}(${JSON.stringify(tu.input)})`);
 -        const output = await executeTool(tu.name, tu.input as Record<string, any>);

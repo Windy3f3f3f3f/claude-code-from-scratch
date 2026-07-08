@@ -9,6 +9,9 @@ import { checkPermission } from "./permissions.js";
 //#step >=7
 import { maybeCompact } from "./context.js";
 //#endstep
+//#step >=8
+import { recallMemories } from "./memory.js";
+//#endstep
 
 const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
 
@@ -44,16 +47,21 @@ export class Agent {
       // Before each model call, compact the history if it has grown too long.
       this.messages = await maybeCompact(this.messages, this.client, MODEL);
 //#endstep
+//#step >=3
+      let system = buildSystemPrompt();
+//#step <=2
+      let system = SYSTEM_PROMPT;
+//#endstep
+//#step >=8
+      // Recall memories relevant to what the user just asked, into the prompt.
+      system += recallMemories(userText);
+//#endstep
       // Build the request once. Passing `tools` is the one line that makes the
       // model tool-aware. Chapter 5 turns the call itself into a stream.
       const request = {
         model: MODEL,
         max_tokens: 4096,
-//#step >=3
-        system: buildSystemPrompt(),
-//#step <=2
-        system: SYSTEM_PROMPT,
-//#endstep
+        system,
         tools: toolDefinitions,
         messages: this.messages,
       };

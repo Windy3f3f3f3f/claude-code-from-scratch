@@ -1,0 +1,14 @@
+{
+  "id": "recall-memory",
+  "prompt": "Where should I deploy my changes to test them?",
+  "setup": {
+    "files": {
+      ".mini-memory/deploy.md": "The staging deploy target is https://staging.example.com"
+    }
+  },
+  "turns": [
+    {
+      "text": "Deploy to https://staging.example.com (staging)."
+    }
+  ]
+}

@@ -18,9 +18,94 @@ graph TB
     style Inject fill:#e8e0ff
 ```
 
+> ▶ **跑这一章**：`node steps/run.mjs 8`（无需 API key）——看它从磁盘里的记忆认出「部署去 staging」。加 `--diff` 看它比上一章多了什么。
+
 ---
 
 ## 我们的实现
+
+到现在，agent 的「记忆」还只是那个消息数组——会话一关就全忘了。这一章给它跨会话的长期记忆：事实写成磁盘上的小文件，每次对话前按当前问题的相关度捞回几条、拼进 System Prompt。相对上一章，新增了一个 `memory.ts`，agent 调模型前把召回的记忆追加到系统提示里：
+
+<!-- @diff file=agent.ts step=8 lang=ts -->
+```diff
+@@ -4,4 +4,5 @@ import { buildSystemPrompt } from "./prompt.js";
+ import { checkPermission } from "./permissions.js";
+ import { maybeCompact } from "./context.js";
++import { recallMemories } from "./memory.js";
+ 
+ const MODEL = process.env.MINI_MODEL || "claude-sonnet-4-5-20250929";
+@@ -31,4 +32,6 @@ export class Agent {
+       this.messages = await maybeCompact(this.messages, this.client, MODEL);
+       let system = buildSystemPrompt();
++      // Recall memories relevant to what the user just asked, into the prompt.
++      system += recallMemories(userText);
+       // Build the request once. Passing `tools` is the one line that makes the
+       // model tool-aware. Chapter 5 turns the call itself into a stream.
+```
+<!-- @enddiff -->
+
+召回就是「跟当前问题词有重叠的记忆，取相关度最高的几条」——确定性、不额外调模型：
+
+<!-- tabs:start -->
+#### **TypeScript**
+<!-- @snippet lang=ts file=memory.ts region=recall step=8 -->
+```typescript
+export function recallMemories(query: string): string {
+  if (!existsSync(MEMORY_DIR)) return "";
+  const queryWords = new Set(query.toLowerCase().split(/\W+/).filter((w) => w.length > 2));
+
+  const scored: { text: string; score: number }[] = [];
+  for (const file of readdirSync(MEMORY_DIR).filter((f) => f.endsWith(".md"))) {
+    const text = readFileSync(join(MEMORY_DIR, file), "utf-8").trim();
+    const words = new Set(text.toLowerCase().split(/\W+/));
+    let score = 0;
+    for (const w of queryWords) if (words.has(w)) score++;
+    if (score > 0) scored.push({ text, score });
+  }
+  if (scored.length === 0) return "";
+
+  const top = scored.sort((a, b) => b.score - a.score).slice(0, 3).map((s) => `- ${s.text}`).join("\n");
+  return `\n\n# Memory (things you remember about the user and project)\n${top}`;
+}
+```
+<!-- @endsnippet -->
+#### **Python**
+<!-- @snippet lang=py file=memory.py region=recall step=8 -->
+```python
+def recall_memories(query: str) -> str:
+    if not os.path.isdir(MEMORY_DIR):
+        return ""
+    query_words = {w for w in re.split(r"\W+", query.lower()) if len(w) > 2}
+
+    scored = []
+    for name in os.listdir(MEMORY_DIR):
+        if not name.endswith(".md"):
+            continue
+        text = open(os.path.join(MEMORY_DIR, name), encoding="utf-8").read().strip()
+        words = set(re.split(r"\W+", text.lower()))
+        score = sum(1 for w in query_words if w in words)
+        if score > 0:
+            scored.append((score, text))
+    if not scored:
+        return ""
+
+    top = "\n".join(f"- {t}" for _, t in sorted(scored, key=lambda s: -s[0])[:3])
+    return f"\n\n# Memory (things you remember about the user and project)\n{top}"
+```
+<!-- @endsnippet -->
+<!-- tabs:end -->
+
+跑一下，磁盘里存着一条「部署去 staging」，问到部署时它就被召回、agent 于是知道：
+
+<!-- @transcript step=8 lang=ts -->
+```
+$ node steps/run.mjs 8
+▶ step 8 demo (no API key — local mock model)   sandbox: <sandbox>
+  you: Where should I deploy my changes to test them?
+
+Deploy to https://staging.example.com (staging).
+```
+<!-- @endtranscript -->
 
 ### 存储结构
 

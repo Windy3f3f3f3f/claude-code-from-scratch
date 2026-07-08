@@ -51,8 +51,8 @@ Chapter 1 noted that the message array grows every turn. Run long enough and it 
      while (true) {
 +      // Before each model call, compact the history if it has grown too long.
 +      this.messages = await maybeCompact(this.messages, this.client, MODEL);
+       let system = buildSystemPrompt();
        // Build the request once. Passing `tools` is the one line that makes the
-       // model tool-aware. Chapter 5 turns the call itself into a stream.
 ```
 <!-- @enddiff -->
 
