@@ -77,6 +77,8 @@ That was blocked because we're in plan (read-only) mode.
 ```
 <!-- @endtranscript -->
 
+> 到这里，本章能跑的那段最小实现就讲完了——上面这些就是 `node steps/run.mjs` 这一章实际执行的**全部**代码。下面是仓库里 production 版 mini-claude 对同一件事的完整做法：边界情况、工程细节更多，当**选读扩展**看，跟这一章跑起来的那段不是同一份代码。
+
 ### 工具定义
 
 Plan Mode 需要两个工具，标记为 `deferred`（延迟加载，详见[第 2 章](docs/02-tools.md)）：

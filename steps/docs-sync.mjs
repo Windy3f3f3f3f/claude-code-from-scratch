@@ -88,14 +88,16 @@ function normalizeTranscript(s) {
 
 // The transcript is exactly what a reader sees running the demo command — we
 // shell out to run.mjs so it can't diverge from the real thing.
-async function transcript(step, lang) {
+async function transcript(step, lang, caseId) {
   const args = [join(HERE, "run.mjs"), String(step)];
   if (lang === "py") args.push("--py");
+  if (caseId) args.push("--case", caseId);
   const env = { ...process.env, NO_COLOR: "1" };
   for (const k of ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete env[k];
   const r = spawnSync("node", args, { encoding: "utf-8", env, timeout: 60000 });
-  if (r.status !== 0) throw new Error(`run.mjs ${step} ${lang} failed: ${(r.stderr || "").split("\n").slice(-3).join(" | ")}`);
-  return normalizeTranscript(`$ node steps/run.mjs ${step}${lang === "py" ? " --py" : ""}\n${r.stdout || ""}`);
+  if (r.status !== 0) throw new Error(`run.mjs ${step} ${lang}${caseId ? ` --case ${caseId}` : ""} failed: ${(r.stderr || "").split("\n").slice(-3).join(" | ")}`);
+  const shown = `$ node steps/run.mjs ${step}${caseId ? ` --case ${caseId}` : ""}${lang === "py" ? " --py" : ""}`;
+  return normalizeTranscript(`${shown}\n${r.stdout || ""}`);
 }
 
 const PLACEHOLDER = /<!--\s*@(snippet|diff|transcript)\s+([^>]*?)\s*-->/g;
@@ -104,7 +106,7 @@ function parseAttrs(s) { const o = {}; for (const m of s.matchAll(/(\w+)=(\S+)/g
 async function blockFor(kind, a) {
   if (kind === "snippet") return "```" + (langOf[a.lang] || a.lang) + "\n" + extractRegion(a.file, a.lang, Number(a.step), a.region) + "\n```";
   if (kind === "diff") return "```diff\n" + diffBlock(a.file, Number(a.step), a.lang) + "\n```";
-  return "```\n" + (await transcript(Number(a.step), a.lang)) + "\n```";
+  return "```\n" + (await transcript(Number(a.step), a.lang, a.case)) + "\n```";
 }
 
 // Walk placeholders left-to-right with a moving cursor so identical placeholders

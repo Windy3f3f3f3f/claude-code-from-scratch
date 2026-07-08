@@ -116,7 +116,22 @@ Created done.txt.
 ```
 <!-- @endtranscript -->
 
-下面三节是更完整的讨论——真实 Claude Code 怎么做、我们的取舍、以及 `/loop` 和 Auto Mode 的分类器细节。
+另一件 `--auto`：分类器读一遍对话记录，替确认框判断这次写该不该放行。跑 `node steps/run.mjs 15 --case auto-blocks-write`，模型想写 `secret.txt`，分类器判 BLOCK，写就没落盘：
+
+<!-- @transcript step=15 case=auto-blocks-write lang=ts -->
+```
+$ node steps/run.mjs 15 --case auto-blocks-write
+▶ step 15 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude --auto Create secret.txt with credentials.
+
+(auto mode: a classifier gates each write)
+
+  → write_file({"file_path":"secret.txt","content":"creds"})
+That write was blocked by the auto-mode monitor.
+```
+<!-- @endtranscript -->
+
+`/loop` 没做进能跑的最小实现，只在下文讲。下面三节是更完整的讨论——真实 Claude Code 怎么做、我们的取舍、以及 `/loop` 和 Auto Mode 的分类器细节。
 
 ## §1 `/goal` — 用评估器把一个条件追到底
 
@@ -134,9 +149,9 @@ Created done.txt.
 
 评估器的输出契约在真实 Claude Code 里是 API 层的 `json_schema` 强约束（`required` 是 `ok` 和 `reason`，`additionalProperties: false`），跑在 `effort: "high"`，而且工具列表为空——它只判断，不干活。判断只依据已经嵌进请求里的对话记录，给了 `transcript_path` 也读不了文件。
 
-### 我们的实现
+### 完整实现（production 版，含 impossible 三态）
 
-我们把这套照着搬进 `autonomy.ts` / `autonomy.py`，只在一处做了教学取舍。设目标的注入语、评估器的系统提示（含 `impossible` 那整段防滥用），都按逆向实锤逐字放进常量。回灌循环放在 `agent` 里而不是 REPL 里，这样一次性（one-shot）调用也能复用：
+本章能跑的那段 steps 版只演示了 MET / NOT_MET 两态，够看清回灌循环的机制。下面是 production 版 mini-claude 的完整做法：多补了 `impossible` 三态、`json_schema` 强约束和保守解析。它照着逆向实锤搬进 `autonomy.ts` / `autonomy.py`，只在一处做了教学取舍。设目标的注入语、评估器的系统提示（含 `impossible` 那整段防滥用），都按逆向实锤逐字放进常量。回灌循环放在 `agent` 里而不是 REPL 里，这样一次性（one-shot）调用也能复用：
 
 ```ts
 async pursueGoal(directive: string): Promise<void> {
@@ -237,7 +252,9 @@ fast-path 放行只读或无副作用的工具（`read_file` / `grep_search` 等
 
 ### 差在哪
 
-我们做的是两段式,和真实 Claude Code 的 `both` 模式一样:第一段是激进的廉价闸——不看用户意图、不认 ALLOW 例外,只要「任一规则可能命中」就拦(后缀是 `suffix_stage1`);第一段放行就一次调用搞定。第一段拦了,才进第二段的审慎裁决——这一段**会**权衡 transcript 里的用户意图、能解除拦截(后缀 `suffix_stage2`),它的结论是最终结论。两段用同一套系统提示,只换 user 消息里的后缀。差别在:我们没复刻真实客户端那两段的 `stop_sequences` 和 thinking-token 细节(第一段 max_tokens 更小、第二段能思考),只复刻了「先廉价闸、后审慎复核」这个流程。规则桶我们只带了代表性子集,全量约九十多条,用 `claude auto-mode defaults` 可以自取。还有一批我们没做,各自在真实实现里都是独立的一层:GrowthBook 下发的灰度配置和熔断开关、命令级的 Bash 分类器、以及帮你审自己写的规则的 critique 元评估器——这些第 18 章(how-claude-code-works)都有。分类器背后跑哪个模型、阈值多少、服务端会不会二次改写提示词,是我们看不到的盲区。
+我们做的是两段式，跟真实 Claude Code 的 `both` 模式一样。第一段是激进的廉价闸：不看用户意图、不认 ALLOW 例外，只要「任一规则可能命中」就拦（后缀 `suffix_stage1`），放行就一次调用搞定。第一段拦了，才进第二段的审慎裁决——这一段会权衡 transcript 里的用户意图、能解除拦截（后缀 `suffix_stage2`），它的结论是最终结论。两段共用同一套系统提示，只换 user 消息里的后缀。
+
+我们只复刻了「先廉价闸、后审慎复核」这个流程，没复刻真实客户端那两段的 `stop_sequences` 和 thinking-token 细节（第一段 max_tokens 更小、第二段能思考）。规则桶只带了代表性子集，全量约九十多条，用 `claude auto-mode defaults` 可以自取。还有几层我们没做，每层在真实实现里都独立成章：GrowthBook 下发的灰度配置和熔断开关、命令级的 Bash 分类器、帮你审自己写的规则的 critique 元评估器——这些第 18 章（how-claude-code-works）都讲了。至于分类器背后跑哪个模型、阈值多少、服务端会不会二次改写提示词，是我们看不到的盲区。
 
 ## 三者对照
 

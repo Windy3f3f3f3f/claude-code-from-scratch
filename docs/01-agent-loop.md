@@ -54,7 +54,7 @@ async function chatOnce(messages, userMessage) {
 
 ## 给循环装上手：工具回路
 
-要让模型能动手，只差两件事。一是在请求里带上工具清单，告诉它「你可以调 read_file、run_shell 这些」；二是当它回复里带着「我要调 read_file」时，我们真的去执行，把结果作为下一条消息喂回去，然后再调一次模型，让它接着往下走。
+要让模型能动手，只差两件事。一是在请求里带上工具清单，告诉它有哪些工具可调——第 1 章先只给一个 `read_file`，下一章再补齐写文件、跑命令等；二是当它回复里带着「我要调 read_file」时，我们真的去执行，把结果作为下一条消息喂回去，然后再调一次模型，让它接着往下走。
 
 这两件事就是那个 `while` 循环的由来。把上面的 `chatOnce` 改成这样：
 
@@ -94,7 +94,7 @@ async function chat(messages, userMessage) {
 
 **决定循环转不转的，从头到尾是模型，不是我们的代码。** 我们没写任何「如果是读文件请求就……」的分支——是模型自己决定这一步要不要动手、动手之后够不够、要不要再来一轮。这一点就是 agent 和聊天机器人的分界线。
 
-到这里，可运行的最小版就成型了。上面为讲清概念用的是几个自由函数，真代码把它们收进一个 `Agent` 类，对应关系就三点：`messages` 变成实例上的 `this.messages`、`client` 收进 `Agent` 构造函数、`executeTool` 和 `toolDefinitions` 从 `tools.ts` 引进来（下一章造）。下面这段就是 steps 里第 1 章的 `Agent.chat`，两种语言一一对应，真能跑：
+到这里，可运行的最小版就成型了。上面为讲清概念用的是几个自由函数，真代码把它们收进一个 `Agent` 类，对应关系就三点：`messages` 变成实例上的 `this.messages`、`client` 收进 `Agent` 构造函数、`executeTool` 和 `toolDefinitions` 从 `tools.ts` 引进来（第 1 章的 `tools.ts` 里只有 `read_file`，下一章补齐其余工具）。下面这段就是 steps 里第 1 章的 `Agent.chat`，两种语言一一对应，真能跑：
 
 <!-- tabs:start -->
 #### **TypeScript**

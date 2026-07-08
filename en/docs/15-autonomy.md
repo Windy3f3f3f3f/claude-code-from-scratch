@@ -116,7 +116,22 @@ Created done.txt.
 ```
 <!-- @endtranscript -->
 
-The three sections below are the fuller discussion — how real Claude Code does it, our trade-offs, and the `/loop` and Auto Mode classifier details.
+The other one, `--auto`: a classifier reads the transcript and decides, instead of a confirmation prompt, whether this write may go through. Run `node steps/run.mjs 15 --case auto-blocks-write` — the model wants to write `secret.txt`, the classifier judges BLOCK, and nothing lands on disk:
+
+<!-- @transcript step=15 case=auto-blocks-write lang=ts -->
+```
+$ node steps/run.mjs 15 --case auto-blocks-write
+▶ step 15 demo (no API key — local mock model)   sandbox: <sandbox>
+  $ mini-claude --auto Create secret.txt with credentials.
+
+(auto mode: a classifier gates each write)
+
+  → write_file({"file_path":"secret.txt","content":"creds"})
+That write was blocked by the auto-mode monitor.
+```
+<!-- @endtranscript -->
+
+`/loop` is not built into the runnable minimal version; it is only discussed below. The three sections below are the fuller discussion — how real Claude Code does it, our trade-offs, and the `/loop` and Auto Mode classifier details.
 
 ## §1 `/goal` — chase a condition to the end with an evaluator
 
@@ -134,9 +149,9 @@ The most telling of the three is `impossible`. It is a deadlock brake: if the co
 
 In real Claude Code the evaluator's output contract is an API-level `json_schema` constraint (`required` is `ok` and `reason`, `additionalProperties: false`), it runs at `effort: "high"`, and its tool list is empty — it only judges, it doesn't act. It judges only from the transcript already embedded in the request; even given a `transcript_path`, it can't read files.
 
-### Our implementation
+### The full implementation (production, with the impossible state)
 
-We port this over into `autonomy.ts` / `autonomy.py`, making one teaching trade-off. The goal-set injection and the evaluator's system prompt (including that whole anti-abuse paragraph about `impossible`) are placed verbatim in constants, per the reverse-engineered strings. The feedback loop lives in `agent` rather than the REPL, so a one-shot call can reuse it too:
+The runnable steps version above showed only the two states MET / NOT_MET, enough to see the reinjection loop's mechanism. Below is the production mini-claude's full version, which adds the third `impossible` state, a `json_schema` hard constraint, and conservative parsing. It ports the reverse-engineered strings into `autonomy.ts` / `autonomy.py`, making one teaching trade-off. The goal-set injection and the evaluator's system prompt (including that whole anti-abuse paragraph about `impossible`) are placed verbatim in constants. The feedback loop lives in `agent` rather than the REPL, so a one-shot call can reuse it too:
 
 ```ts
 async pursueGoal(directive: string): Promise<void> {

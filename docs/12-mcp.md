@@ -217,7 +217,9 @@ $ node steps/run.mjs 12
 ```
 <!-- @endtranscript -->
 
-用 **~277 行** 的 `mcp.ts` 实现完整的 MCP 客户端，无任何 SDK 依赖。
+> 到这里，本章能跑的那段最小实现就讲完了——上面这些就是 `node steps/run.mjs` 这一章实际执行的**全部**代码。下面是仓库里 production 版 mini-claude 对同一件事的完整做法：边界情况、工程细节更多，当**选读扩展**看，跟这一章跑起来的那段不是同一份代码。
+
+本章 runnable step 的 `mcp.ts` 只有 **~43 行**，演示 stdio JSON-RPC 最短的那条路。仓库里 production 版 `src/mcp.ts` 约 **277 行**，补了配置加载、多服务器、超时和错误处理——但它仍不是完整的 MCP 实现，不含 SSE 传输、OAuth 和动态刷新。两版都不依赖任何 MCP SDK，读者能直接看到协议本身。
 
 | Claude Code | 我们的实现 | 简化原因 |
 |-------------|-----------|---------|

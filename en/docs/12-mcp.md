@@ -217,7 +217,9 @@ $ node steps/run.mjs 12
 ```
 <!-- @endtranscript -->
 
-A complete MCP client in **~277 lines** of `mcp.ts`, with zero SDK dependencies.
+> That is the whole runnable step for this chapter — everything `node steps/run.mjs` actually executes here is above. Below is how the repo's production mini-claude does the same thing in full: more edge cases and engineering detail. Read it as an **optional deep-dive**; it is not the code the runnable step runs.
+
+This chapter's runnable-step `mcp.ts` is only **~43 lines**, showing the shortest path through stdio JSON-RPC. The repo's production `src/mcp.ts` is about **277 lines**, adding config loading, multiple servers, timeouts, and error handling — but it is still not a complete MCP implementation: no SSE transport, OAuth, or dynamic refresh. Neither version depends on an MCP SDK, so readers see the protocol itself.
 
 | Claude Code | Our Implementation | Simplification Reason |
 |-------------|-------------------|----------------------|

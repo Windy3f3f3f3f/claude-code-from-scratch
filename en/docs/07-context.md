@@ -137,6 +137,8 @@ All three read: alpha, beta, gamma.
 ```
 <!-- @endtranscript -->
 
+> That is the whole runnable step for this chapter — everything `node steps/run.mjs` actually executes here is above. Below is how the repo's production mini-claude does the same thing in full: more edge cases and engineering detail. Read it as an **optional deep-dive**; it is not the code the runnable step runs.
+
 Built in layers: execution-time truncation (Tier 0) as the floor catching a single oversized output, with 4 compression tiers on top — Budget, Snip, Microcompact, Auto-compact — from lightest to heaviest; the first three run in order before each API call, and the heaviest, Auto-compact, fires at the turn boundary.
 
 ### Tier 0: Execution-Time Truncation (truncateResult)

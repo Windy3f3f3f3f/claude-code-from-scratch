@@ -106,6 +106,8 @@ feat: add the new thing
 ```
 <!-- @endtranscript -->
 
+> That is the whole runnable step for this chapter — everything `node steps/run.mjs` actually executes here is above. Below is how the repo's production mini-claude does the same thing in full: more edge cases and engineering detail. Read it as an **optional deep-dive**; it is not the code the runnable step runs.
+
 ### SKILL.md Format
 
 ```markdown

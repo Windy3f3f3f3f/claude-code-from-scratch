@@ -136,6 +136,8 @@ The sub-agent reports greeting.txt says: hello from the subagent demo.
 ```
 <!-- @endtranscript -->
 
+> 到这里，本章能跑的那段最小实现就讲完了——上面这些就是 `node steps/run.mjs` 这一章实际执行的**全部**代码。下面是仓库里 production 版 mini-claude 对同一件事的完整做法：边界情况、工程细节更多，当**选读扩展**看，跟这一章跑起来的那段不是同一份代码。
+
 用 **~199 行** 的 `subagent.ts` + Agent 类的少量改动，实现 Sub-Agent 模式的核心。
 
 | Claude Code | 我们的实现 | 简化原因 |

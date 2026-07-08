@@ -43,10 +43,12 @@ const STEP_INFO = {
 
 const args = process.argv.slice(2);
 const flag = (f) => args.includes(f);
+const argVal = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
 const stepArg = args.find((a) => /^\d+$/.test(a));
 const dashDash = args.indexOf("--");
 const promptArgs = dashDash >= 0 ? args.slice(dashDash + 1) : [];
 const usePy = flag("--py");
+const caseId = argVal("--case"); // pick a specific scenario for steps with several
 
 if (!existsSync(DIST)) spawnSync("node", [join(HERE, "build.mjs")], { stdio: "inherit" });
 const stepDirs = existsSync(DIST) ? readdirSync(DIST).sort() : [];
@@ -63,14 +65,18 @@ if (!name) { console.error(`Step ${n} not found. Have: ${stepDirs.join(", ")}`);
 
 // --- --diff: what this chapter changed vs the previous one (source only) ---
 if (flag("--diff")) {
-  const prev = nameOf(n - 1);
+  // the previous GENERATED step (chapters 13/14 add no code, so ch15 diffs vs ch12)
+  let prev = null;
+  for (let k = n - 1; k >= 1; k--) { const p = nameOf(k); if (p) { prev = p; break; } }
   if (!prev) { console.log(`Step ${n} is the first step — nothing to diff.`); process.exit(0); }
   const lang = usePy ? "py" : "ts";
   const ext = usePy ? ".py" : ".ts";
   const srcFiles = new Set([...listSrc(join(DIST, prev, lang), ext), ...listSrc(join(DIST, name, lang), ext)]);
   for (const f of [...srcFiles].sort()) {
-    spawnSync("git", ["--no-pager", "diff", "--no-index", "--",
-      join(DIST, prev, lang, f), join(DIST, name, lang, f)], { stdio: "inherit" });
+    // a file new in this chapter has no previous version — diff against /dev/null
+    const a = existsSync(join(DIST, prev, lang, f)) ? join(DIST, prev, lang, f) : "/dev/null";
+    const b = existsSync(join(DIST, name, lang, f)) ? join(DIST, name, lang, f) : "/dev/null";
+    spawnSync("git", ["--no-pager", "diff", "--no-index", "--", a, b], { stdio: "inherit" });
   }
   process.exit(0);
 }
@@ -100,9 +106,11 @@ if (flag("--live")) {
 
 // --- default: no-key demo against the local mock ---
 const map = JSON.parse(readFileSync(join(SCEN, "_map.json"), "utf-8"));
-// A step may map to several scenarios (e.g. ch15); the demo runs the first.
+// A step may map to several scenarios (e.g. ch15); --case picks one, else first.
 const mapEntry = map[String(n)];
-const conf = Array.isArray(mapEntry) ? mapEntry[0] : mapEntry;
+const confs = Array.isArray(mapEntry) ? mapEntry : [mapEntry];
+const conf = caseId ? confs.find((c) => c.scenario === caseId) : confs[0];
+if (!conf) { console.error(`Step ${n} has no scenario "${caseId}". Have: ${confs.map((c) => c.scenario).join(", ")}`); process.exit(1); }
 const scenarioPath = join(SCEN, conf.scenario + ".json");
 const scenario = JSON.parse(readFileSync(scenarioPath, "utf-8"));
 const expect = conf.expect || {};

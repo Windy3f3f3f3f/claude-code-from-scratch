@@ -54,7 +54,7 @@ It's not unwilling — it just has no hands. The model can only emit text, and t
 
 ## Giving the Loop Hands: The Tool Round-Trip
 
-Letting the model act takes just two things. One is to include a tool list in the request, telling it "you can call read_file, run_shell, and so on." The other is that when its reply carries "I want to call read_file," we actually run it, feed the result back as the next message, and then call the model again so it can keep going.
+Letting the model act takes just two things. One is to include a tool list in the request, telling it which tools it can call — chapter 1 gives it just one, `read_file`, and the next chapter adds writing files, running commands, and the rest. The other is that when its reply carries "I want to call read_file," we actually run it, feed the result back as the next message, and then call the model again so it can keep going.
 
 Those two things are where the `while` loop comes from. Turn the `chatOnce` above into this:
 
@@ -94,7 +94,7 @@ Just two additions over the first version: `tools: toolDefinitions` in the reque
 
 **What decides whether the loop keeps turning is the model, from start to finish — not our code.** We wrote no "if it's a read-file request then…" branch — the model itself decides whether to act this step, whether that was enough, whether to go another round. That is the line between an agent and a chatbot.
 
-By now the runnable minimal version has taken shape. The concepts above used a few free functions; the real code gathers them into an `Agent` class, and the mapping is just three points: `messages` becomes `this.messages` on the instance, `client` moves into the `Agent` constructor, and `executeTool` / `toolDefinitions` are imported from `tools.ts` (built next chapter). The block below is the `Agent.chat` from step 1 of the steps track, one-to-one across both languages, and it really runs:
+By now the runnable minimal version has taken shape. The concepts above used a few free functions; the real code gathers them into an `Agent` class, and the mapping is just three points: `messages` becomes `this.messages` on the instance, `client` moves into the `Agent` constructor, and `executeTool` / `toolDefinitions` are imported from `tools.ts` (chapter 1's `tools.ts` holds only `read_file`; the next chapter fills in the rest). The block below is the `Agent.chat` from step 1 of the steps track, one-to-one across both languages, and it really runs:
 
 <!-- tabs:start -->
 #### **TypeScript**

@@ -77,6 +77,8 @@ That was blocked because we're in plan (read-only) mode.
 ```
 <!-- @endtranscript -->
 
+> That is the whole runnable step for this chapter — everything `node steps/run.mjs` actually executes here is above. Below is how the repo's production mini-claude does the same thing in full: more edge cases and engineering detail. Read it as an **optional deep-dive**; it is not the code the runnable step runs.
+
 ### Tool Definitions
 
 Plan Mode requires two tools, marked as `deferred` (lazy-loaded, see [Chapter 2](/en/docs/02-tools.md)):
