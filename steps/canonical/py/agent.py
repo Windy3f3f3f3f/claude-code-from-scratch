@@ -45,11 +45,14 @@ class Agent:
             kwargs["system"] = SYSTEM_PROMPT
 #endstep
 
-            # Print the assistant's text as it streams in.
-            with self.client.messages.stream(**kwargs) as stream:
-                for text in stream.text_stream:
-                    print(text, end="", flush=True)
-                reply = stream.get_final_message()
+            # Ask the model for its next step. (Chapter 5 turns this into a
+            # streaming call.)
+            reply = self.client.messages.create(**kwargs)
+
+            # Print the assistant's text.
+            for block in reply.content:
+                if block.type == "text":
+                    print(block.text, end="", flush=True)
             print()
 
             # Record the assistant's full reply (text + any tool calls).

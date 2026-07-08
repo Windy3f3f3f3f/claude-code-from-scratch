@@ -1,0 +1,9 @@
+{
+  "id": "read-a-file",
+  "prompt": "Read the file greeting.txt and tell me what it says.",
+  "turns": [
+    { "tools": [{ "name": "read_file", "input": { "file_path": "greeting.txt" } }] },
+    { "text": "greeting.txt says: hello from step one." }
+  ],
+  "setup": { "files": { "greeting.txt": "hello from step one" } }
+}

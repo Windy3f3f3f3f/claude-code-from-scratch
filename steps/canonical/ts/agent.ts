@@ -33,7 +33,9 @@ export class Agent {
     this.messages.push({ role: "user", content: userText });
 
     while (true) {
-      const stream = this.client.messages.stream({
+      // Ask the model for its next step. Passing `tools` is the one line that
+      // makes it tool-aware. (Chapter 5 turns this into a streaming call.)
+      const reply = await this.client.messages.create({
         model: MODEL,
         max_tokens: 4096,
 //#step >=3
@@ -41,14 +43,14 @@ export class Agent {
 //#step <=2
         system: SYSTEM_PROMPT,
 //#endstep
-        // Passing `tools` is the one line that makes the model tool-aware.
         tools: toolDefinitions,
         messages: this.messages,
       });
 
-      // Print the assistant's text as it streams in.
-      stream.on("text", (t) => process.stdout.write(t));
-      const reply = await stream.finalMessage();
+      // Print the assistant's text.
+      for (const block of reply.content) {
+        if (block.type === "text") process.stdout.write(block.text);
+      }
       process.stdout.write("\n");
 
       // Record the assistant's full reply (text + any tool calls).

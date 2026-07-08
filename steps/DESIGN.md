@@ -129,14 +129,25 @@ Decisions locked by Gate 0:
   each turn is either `{text}` or `{tool_use:[{name,input}], then...}`. `test.mjs`,
   `run --demo`, and `@transcript` all read the same scenario — no third copy to
   drift. (Gate 0 P2.)
-- **`mock-anthropic.mjs`** is a local HTTP server implementing the real Anthropic
-  `POST /v1/messages` — both `create` and SSE `stream`, returning `tool_use`
-  blocks, `usage`, and error shapes. The agent code is **unmodified**; only
-  `ANTHROPIC_BASE_URL` points at it, so there is no `if (test)` branch in the
-  teaching code. On queue exhaustion it returns an error and the run **fails**
-  (never a false green). It emits an **event log** (JSONL): every request
-  (system, tools, messages), every tool_use it issued, and usage — the machine-
-  observable substrate for assertions and transcripts.
+- **Mock is in-process, per language.** `mock-anthropic.mjs` (Node) and
+  `mock_anthropic.py` (Python) both implement the real Anthropic `POST
+  /v1/messages` — `create` and SSE `stream`, `tool_use` blocks, `usage`, errors —
+  and both read the SAME `scenarios/*.json`. A test/demo starts the mock **in the
+  same process/runtime as the step it drives** (Node mock ↔ TS steps; Python mock
+  ↔ Python steps) and drives the step by importing its `Agent` class with
+  `ANTHROPIC_BASE_URL` pointed at the in-process mock. There is still no `if
+  (test)` branch in the teaching code — only an env var and an imported class.
+  - *Why in-process, per language:* on the dev host, mihomo intercepts
+    cross-process loopback, so a subprocess step cannot reach a mock server in
+    another process (verified). Same-process loopback works everywhere (dev host,
+    CI, reader machines), so the in-process design is strictly more robust. It
+    also gives cleaner assertions (drive `Agent.chat()` directly). The two small
+    mocks mirror each other and share the scenario JSON, so they cannot drift
+    behaviorally.
+- On queue exhaustion the mock returns an error and the run **fails** (never a
+  false green). It emits an **event log** (JSONL): every request (system, tools,
+  messages), every tool_use it issued, and usage — the machine-observable
+  substrate for assertions and transcripts.
 - **`mock-anthropic.selftest.mjs`** (built first): the real TS SDK and the real
   Python SDK each hit the mock for create / stream / tool_use / usage / error and
   must succeed. This proves protocol fidelity before any step depends on it.

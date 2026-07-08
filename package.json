@@ -18,7 +18,10 @@
     "check": "npm run test && npm run test:py",
     "check:full": "npm run check && npm run test:integration:py",
     "steps:build": "node steps/build.mjs",
-    "step": "node steps/run.mjs"
+    "step": "node steps/run.mjs",
+    "steps:test": "node steps/test.mjs",
+    "steps:lint": "node steps/lint-markers.mjs",
+    "steps:selftest": "node steps/mock-anthropic.selftest.mjs"
   },
   "keywords": [
     "claude-code",
