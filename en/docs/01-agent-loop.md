@@ -94,7 +94,7 @@ Just two additions over the first version: `tools: toolDefinitions` in the reque
 
 **What decides whether the loop keeps turning is the model, from start to finish — not our code.** We wrote no "if it's a read-file request then…" branch — the model itself decides whether to act this step, whether that was enough, whether to go another round. That is the line between an agent and a chatbot.
 
-By now the runnable minimal version has taken shape. The block below is exactly the `Agent.chat` from step 1 of the steps track — the loop you just read, as real code that runs in both languages (TypeScript and Python, one-to-one):
+By now the runnable minimal version has taken shape. The concepts above used a few free functions; the real code gathers them into an `Agent` class, and the mapping is just three points: `messages` becomes `this.messages` on the instance, `client` moves into the `Agent` constructor, and `executeTool` / `toolDefinitions` are imported from `tools.ts` (built next chapter). The block below is the `Agent.chat` from step 1 of the steps track, one-to-one across both languages, and it really runs:
 
 <!-- tabs:start -->
 #### **TypeScript**
@@ -185,7 +185,10 @@ def chat(self, user_text: str) -> None:
 <!-- @transcript step=1 lang=ts -->
 ```
 $ node steps/run.mjs 1
+▶ step 1 demo (no API key — local mock model)   sandbox: <sandbox>
   you: Read the file greeting.txt and tell me what it says.
+
+
   → read_file({"file_path":"greeting.txt"})
 greeting.txt says: hello from step one.
 ```
@@ -223,51 +226,13 @@ A round with tools usually adds two entries: one assistant (the tool the model w
 
 ## Wrapping Up: Letting It Stop
 
-Once the loop is running, there will be times to stop it midway — pressing Ctrl+C to make it exit relies on `AbortController`:
-
-<!-- tabs:start -->
-#### **TypeScript**
-```typescript
-async chat(userMessage: string): Promise<void> {
-  this.abortController = new AbortController();
-  try {
-    await this.chatAnthropic(userMessage);
-  } finally {
-    this.abortController = null;
-  }
-  printDivider();
-  this.autoSave();
-}
-
-abort() {
-  this.abortController?.abort();
-}
-```
-#### **Python**
-```python
-async def chat(self, user_message: str) -> None:
-    self._aborted = False
-    try:
-        if self.use_openai:
-            await self._chat_openai(user_message)
-        else:
-            await self._chat_anthropic(user_message)
-    finally:
-        pass
-    if not self.is_sub_agent:
-        print_divider()
-        self._auto_save()
-
-def abort(self) -> None:
-    self._aborted = True
-```
-<!-- tabs:end -->
-
-The TS version uses `AbortController`: once `abort()` is called, the signal becomes `aborted`, the loop exits at the next checkpoint, and the signal is also passed to the Anthropic SDK, cancelling even an in-flight network request. The Python version has no `AbortController`; it uses an `_aborted` flag plus cancelling the current asyncio task to the same effect — the loop still exits at a checkpoint.
+This chapter's minimal version doesn't handle interruption yet — pressing Ctrl+C to stop it gracefully mid-run is something we add in Chapter 4 when the CLI arrives. The real Claude Code threads an `AbortController` through the whole loop: call `abort()` and the signal turns `aborted`, the loop exits at the next checkpoint, and even the in-flight network request is cancelled; the Python side uses a flag plus cancelling the current asyncio task to the same effect.
 
 ## What the Real Claude Code Does Beyond This
 
 The loop above has one decision: continue if there's a tool_use, stop if not. The real Claude Code handles far more — taking its loop apart reflects exactly what stands between a toy loop and a production engine.
+
+> The structures below (layers, module names, approximate line counts) come from analysis of public builds; what Anthropic's own docs confirm is only the tool_use / tool_result loop itself. Internal details change across versions — treat the specific names and counts as a trend, not exact fact.
 
 It splits one loop into two layers. The outer `QueryEngine` (~1,155 lines) runs the conversation's whole lifecycle — user input, USD budget, token stats, session recovery; the inner `queryLoop` (~1,728 lines) runs only how one query executes — message compression, API calls, tool execution, error recovery. The split is for separation of concerns: the outer layer needn't worry about "how to recover from a PTL error," and the inner one needn't worry about "how to parse user input."
 

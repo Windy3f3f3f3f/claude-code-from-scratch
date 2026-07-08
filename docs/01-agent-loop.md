@@ -94,7 +94,7 @@ async function chat(messages, userMessage) {
 
 **决定循环转不转的，从头到尾是模型，不是我们的代码。** 我们没写任何「如果是读文件请求就……」的分支——是模型自己决定这一步要不要动手、动手之后够不够、要不要再来一轮。这一点就是 agent 和聊天机器人的分界线。
 
-到这里，可运行的最小版就成型了。下面这段就是 steps 里第 1 章的 `Agent.chat`——你刚才读到的循环，落成两种语言里真能跑的代码（TypeScript 和 Python 一一对应）：
+到这里，可运行的最小版就成型了。上面为讲清概念用的是几个自由函数，真代码把它们收进一个 `Agent` 类，对应关系就三点：`messages` 变成实例上的 `this.messages`、`client` 收进 `Agent` 构造函数、`executeTool` 和 `toolDefinitions` 从 `tools.ts` 引进来（下一章造）。下面这段就是 steps 里第 1 章的 `Agent.chat`，两种语言一一对应，真能跑：
 
 <!-- tabs:start -->
 #### **TypeScript**
@@ -185,7 +185,10 @@ def chat(self, user_text: str) -> None:
 <!-- @transcript step=1 lang=ts -->
 ```
 $ node steps/run.mjs 1
+▶ step 1 demo (no API key — local mock model)   sandbox: <sandbox>
   you: Read the file greeting.txt and tell me what it says.
+
+
   → read_file({"file_path":"greeting.txt"})
 greeting.txt says: hello from step one.
 ```
@@ -223,51 +226,13 @@ greeting.txt says: hello from step one.
 
 ## 收尾：让它能停下来
 
-循环跑起来后，总有中途想停的时候——按 Ctrl+C 让它退出，靠的是 `AbortController`：
-
-<!-- tabs:start -->
-#### **TypeScript**
-```typescript
-async chat(userMessage: string): Promise<void> {
-  this.abortController = new AbortController();
-  try {
-    await this.chatAnthropic(userMessage);
-  } finally {
-    this.abortController = null;
-  }
-  printDivider();
-  this.autoSave();
-}
-
-abort() {
-  this.abortController?.abort();
-}
-```
-#### **Python**
-```python
-async def chat(self, user_message: str) -> None:
-    self._aborted = False
-    try:
-        if self.use_openai:
-            await self._chat_openai(user_message)
-        else:
-            await self._chat_anthropic(user_message)
-    finally:
-        pass
-    if not self.is_sub_agent:
-        print_divider()
-        self._auto_save()
-
-def abort(self) -> None:
-    self._aborted = True
-```
-<!-- tabs:end -->
-
-TS 版用 `AbortController`：`abort()` 一调用，signal 变成 `aborted`，循环在下一个检查点退出，这个 signal 还会传给 Anthropic SDK，连正在飞的网络请求一起取消。Python 版没有 `AbortController`，用一个 `_aborted` 标志加取消当前 asyncio task 达到同样效果——循环照样在检查点退出。
+本章的最小版还没处理中断——按 Ctrl+C 让它中途优雅停下来，是第 4 章接上 CLI 时才补的事。真实 Claude Code 用一个 `AbortController` 贯穿整个循环：`abort()` 一调，signal 变 `aborted`，循环在下一个检查点退出，连正在飞的那次网络请求也一起取消；Python 侧没有 `AbortController`，用一个标志加取消当前 asyncio task 达到同样效果。
 
 ## 真实 Claude Code 比这多做了什么
 
 上面那个循环，判断逻辑只有一条：有 tool_use 就继续，没有就停。真实的 Claude Code 处理的情况要多得多——把它的循环拆开看，正好照出一个玩具循环和一个生产级引擎之间隔着哪些东西。
+
+> 下面这些结构（层次、模块名、大致行数）来自对公开版本的分析，Anthropic 官方文档能坐实的只是 tool_use / tool_result 这条工具回路本身；内部实现细节会随版本变化，具体的名字和行数看看趋势就好，别当精确事实。
 
 它把一层循环拆成了两层。外层 `QueryEngine`（约 1155 行）管整个对话的生命周期：用户输入、USD 预算、Token 统计、会话恢复；内层 `queryLoop`（约 1728 行）只管一次查询怎么执行：消息压缩、API 调用、工具执行、错误恢复。这样拆是为了关注点分离——外层不必操心「PTL 错误怎么恢复」，内层不必操心「用户输入怎么解析」。
 

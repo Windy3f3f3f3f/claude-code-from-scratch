@@ -28,7 +28,10 @@ const DIST = join(HERE, "dist");
 const SCEN = join(HERE, "scenarios");
 const check = process.argv.includes("--check");
 
-if (!existsSync(DIST)) spawnSync("node", [join(HERE, "build.mjs")], { stdio: "inherit" });
+// Always regenerate from canonical, so --check can never compare a stale dist
+// (a changed canonical with an old dist would otherwise look "in sync").
+const built = spawnSync("node", [join(HERE, "build.mjs")], { stdio: "inherit" });
+if (built.status !== 0) { console.error("build.mjs failed"); process.exit(2); }
 const stepDirs = readdirSync(DIST).sort();
 const stepName = (n) => stepDirs.find((s) => s.startsWith(String(n).padStart(2, "0") + "-"));
 const langOf = { ts: "typescript", py: "python" };
@@ -64,65 +67,53 @@ function diffBlock(file, step, lang) {
   return body.trim();
 }
 
-function normalizeTranscript(s, workdir) {
+function normalizeTranscript(s) {
   return s
-    .split(workdir).join(".")                       // sandbox path -> .
-    .replace(/\x1b\[[0-9;]*m/g, "")                 // strip ANSI
-    .replace(/\d{4}-\d{2}-\d{2}/g, "<date>")         // stabilize dates
-    .replace(/\s+$/gm, "").trim();
+    .replace(/\x1b\[[0-9;]*m/g, "")                          // strip ANSI
+    .replace(/sandbox: \S+/g, "sandbox: <sandbox>")           // stabilize temp path
+    .replace(/\/tmp\/\S*stepdemo\S*/g, "<sandbox>")           // any stray temp path
+    .replace(/\d{4}-\d{2}-\d{2}/g, "<date>")                  // stabilize dates
+    .replace(/[ \t]+$/gm, "").trim();
 }
 
+// The transcript is exactly what a reader sees running the demo command — we
+// shell out to run.mjs so it can't diverge from the real thing.
 async function transcript(step, lang) {
-  const map = JSON.parse(readFileSync(join(SCEN, "_map.json"), "utf-8"));
-  const scenario = JSON.parse(readFileSync(join(SCEN, map[String(step)].scenario + ".json"), "utf-8"));
-  const workdir = join(tmpdir(), `doctx-${process.pid}-${step}-${lang}`);
-  rmSync(workdir, { recursive: true, force: true }); mkdirSync(workdir, { recursive: true });
-  for (const [f, c] of Object.entries(scenario.setup?.files || {})) { const p = join(workdir, f); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); }
-  const header = `$ node steps/run.mjs ${step}${lang === "py" ? " --py" : ""}\n  you: ${scenario.prompt}\n`;
-  let body = "";
-  if (lang === "py") {
-    const env = { ...process.env }; for (const k of ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete env[k];
-    const r = spawnSync(join(REPO, ".venv", "bin", "python"), [join(HERE, "_pydriver.py"), join(DIST, stepName(step), "py"), join(SCEN, map[String(step)].scenario + ".json"), join(workdir, "_e.jsonl"), workdir], { encoding: "utf-8", env });
-    body = r.stdout || "";
-  } else {
-    const tsDir = join(DIST, stepName(step), "ts");
-    spawnSync(join(REPO, "node_modules", ".bin", "tsc"), ["--module", "nodenext", "--moduleResolution", "nodenext", "--target", "es2022", "--skipLibCheck", "--outDir", tsDir, join(tsDir, "agent.ts")], { encoding: "utf-8" });
-    const mock = await startMock({ scenario, logPath: join(workdir, "_e.jsonl") });
-    const prev = { cwd: process.cwd(), base: process.env.ANTHROPIC_BASE_URL, key: process.env.ANTHROPIC_API_KEY, write: process.stdout.write };
-    let out = ""; process.stdout.write = (s) => { out += s; return true; };
-    process.env.ANTHROPIC_BASE_URL = mock.url; process.env.ANTHROPIC_API_KEY = "test"; process.chdir(workdir);
-    try { const mod = await import(pathToFileURL(join(tsDir, "agent.js")).href + `?t=${Date.now()}`); await new mod.Agent().chat(scenario.prompt); }
-    finally { process.stdout.write = prev.write; process.chdir(prev.cwd); process.env.ANTHROPIC_BASE_URL = prev.base; process.env.ANTHROPIC_API_KEY = prev.key; await mock.close(); }
-    body = out;
-  }
-  rmSync(workdir, { recursive: true, force: true });
-  return normalizeTranscript(header + body, workdir);
-}
-
-// Replace the content between an open placeholder and its @end<kind> with `block`.
-function replaceBlock(text, kind, open, close, block) {
-  const openIdx = text.indexOf(open);
-  const closeIdx = text.indexOf(close, openIdx);
-  if (openIdx < 0 || closeIdx < 0) throw new Error(`unbalanced @${kind}`);
-  const before = text.slice(0, openIdx + open.length);
-  const after = text.slice(closeIdx);
-  return `${before}\n${block}\n${after}`;
+  const args = [join(HERE, "run.mjs"), String(step)];
+  if (lang === "py") args.push("--py");
+  const env = { ...process.env, NO_COLOR: "1" };
+  for (const k of ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete env[k];
+  const r = spawnSync("node", args, { encoding: "utf-8", env, timeout: 60000 });
+  if (r.status !== 0) throw new Error(`run.mjs ${step} ${lang} failed: ${(r.stderr || "").split("\n").slice(-3).join(" | ")}`);
+  return normalizeTranscript(`$ node steps/run.mjs ${step}${lang === "py" ? " --py" : ""}\n${r.stdout || ""}`);
 }
 
 const PLACEHOLDER = /<!--\s*@(snippet|diff|transcript)\s+([^>]*?)\s*-->/g;
 function parseAttrs(s) { const o = {}; for (const m of s.matchAll(/(\w+)=(\S+)/g)) o[m[1]] = m[2]; return o; }
 
+async function blockFor(kind, a) {
+  if (kind === "snippet") return "```" + (langOf[a.lang] || a.lang) + "\n" + extractRegion(a.file, a.lang, Number(a.step), a.region) + "\n```";
+  if (kind === "diff") return "```diff\n" + diffBlock(a.file, Number(a.step), a.lang) + "\n```";
+  return "```\n" + (await transcript(Number(a.step), a.lang)) + "\n```";
+}
+
+// Walk placeholders left-to-right with a moving cursor so identical placeholders
+// and shifting offsets are handled correctly (indexOf-from-start would clobber).
 async function syncFile(path) {
-  let text = readFileSync(path, "utf-8");
-  const original = text;
-  for (const m of [...text.matchAll(PLACEHOLDER)]) {
+  const original = readFileSync(path, "utf-8");
+  let text = original, cursor = 0;
+  while (true) {
+    PLACEHOLDER.lastIndex = cursor;
+    const m = PLACEHOLDER.exec(text);
+    if (!m) break;
     const kind = m[1], a = parseAttrs(m[2]);
-    const open = m[0], close = `<!-- @end${kind} -->`;
-    let block;
-    if (kind === "snippet") block = "```" + (langOf[a.lang] || a.lang) + "\n" + extractRegion(a.file, a.lang, Number(a.step), a.region) + "\n```";
-    else if (kind === "diff") block = "```diff\n" + diffBlock(a.file, Number(a.step), a.lang) + "\n```";
-    else block = "```\n" + (await transcript(Number(a.step), a.lang)) + "\n```";
-    text = replaceBlock(text, kind, open, close, block);
+    const openEnd = m.index + m[0].length;
+    const close = `<!-- @end${kind} -->`;
+    const closeIdx = text.indexOf(close, openEnd);
+    if (closeIdx < 0) throw new Error(`unbalanced @${kind} near offset ${m.index}`);
+    const segment = `\n${await blockFor(kind, a)}\n`;
+    text = text.slice(0, openEnd) + segment + text.slice(closeIdx);
+    cursor = openEnd + segment.length + close.length;
   }
   const changed = text !== original;
   if (changed && !check) writeFileSync(path, text);
