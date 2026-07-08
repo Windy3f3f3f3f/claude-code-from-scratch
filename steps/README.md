@@ -1,31 +1,38 @@
 # Runnable steps
 
-Each chapter of the tutorial has a **runnable code state**. Enter the code as it
-stands at the end of chapter *N* and run it against a real model:
+Every code chapter of the tutorial has a **runnable code state**. Each one runs
+with **no API key** against a local mock model, so you can enter the code as it
+stands at the end of chapter *N* and watch it work:
 
 ```bash
 npm install                      # once, at the repo root
-cp .env.example .env             # then put your key in .env (see below)
 
-node steps/run.mjs 1             # chapter 1 REPL (TypeScript)
-node steps/run.mjs 2 -- "create hello.txt with the text hi"   # one-shot
-node steps/run.mjs 3 --py        # chapter 3, Python version
+node steps/run.mjs --list        # list every runnable step
+node steps/run.mjs 7             # chapter 7 demo, no key (local mock)
+node steps/run.mjs 7 --diff      # what chapter 7 added over the previous step
+node steps/run.mjs 7 --py        # the Python version
 ```
 
-`.env` needs an Anthropic key (a relay works too):
+The demo replays a scripted scenario so the output is deterministic. To drive a
+step with your **own** prompt against a **real** model, add `--live` and put a
+key in `.env` at the repo root:
 
-```
-ANTHROPIC_API_KEY=sk-...
-ANTHROPIC_BASE_URL=https://api.anthropic.com   # or your relay
+```bash
+cp .env.example .env             # then set ANTHROPIC_API_KEY (a relay URL works too)
+node steps/run.mjs 2 --live -- "create hello.txt with the text hi"
 ```
 
-The three pilot steps:
+The runnable steps cover chapters 1–12 and 15 (chapters 13/14 add no code); run
+`node steps/run.mjs --list` for the full map. A few landmarks:
 
 | Step | Chapter | The agent can now… |
 |------|---------|--------------------|
 | 1 | Agent loop | talk to the model in a loop and call one tool (`read_file`) |
-| 2 | Tools | read, write, edit, list, grep, and run shell commands |
-| 3 | System prompt | behave like a coding agent (identity, rules, environment) |
+| 6 | Permissions | a gate blocks dangerous tool calls |
+| 7 | Context | summarize (compact) older messages when history grows |
+| 11 | Multi-agent | fork a read-only sub-agent to investigate |
+| 12 | MCP | connect an external stdio tool server |
+| 15 | Autonomy | `/goal` chases a condition; `--auto` gates writes with a classifier |
 
 ## How it works — one source, generated snapshots
 

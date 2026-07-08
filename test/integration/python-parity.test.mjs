@@ -6,9 +6,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join, isAbsolute } from "node:path";
+import { existsSync } from "node:fs";
 import { runRepl } from "./harness.mjs";
 
-const PY = process.env.INTEG_PYTHON || "python3";
+// Prefer the repo's own virtualenv (which has anthropic/openai) so `check:full`
+// actually RUNS these instead of silently skipping on a bare python3. Resolve to
+// an absolute path — the harness runs from a temp cwd, so a relative one ENOENTs.
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const VENV_PY = join(REPO, ".venv", "bin", "python");
+const PY = process.env.INTEG_PYTHON
+  ? (isAbsolute(process.env.INTEG_PYTHON) ? process.env.INTEG_PYTHON : join(REPO, process.env.INTEG_PYTHON))
+  : (existsSync(VENV_PY) ? VENV_PY : "python3");
 function pythonHasDeps() {
   const r = spawnSync(PY, ["-c", "import anthropic, openai"], { stdio: "ignore" });
   return r.status === 0;
