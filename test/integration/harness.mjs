@@ -69,15 +69,53 @@ function assertNoExhaustion(servedLog, allowExhausted = []) {
   }
 }
 
-function makeEnv(mockPort, home) {
-  return {
+// Load .env once so LIVE mode can reach the real API (both backends). Only used
+// when a test passes live:true; mock mode never touches these.
+function loadDotenv(p) {
+  const out = {};
+  try {
+    for (const line of readFileSync(p, "utf8").split("\n")) {
+      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (m) out[m[1]] = m[2];
+    }
+  } catch { /* no .env */ }
+  return out;
+}
+const LIVE = loadDotenv(join(REPO, ".env"));
+// Is a real key present for this backend? Live tests skip cleanly when not.
+export function liveKeyAvailable(backend) {
+  if (backend === "anthropic") return !!(LIVE.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY);
+  return !!((LIVE.OPENAI_API_KEY || process.env.OPENAI_API_KEY) && (LIVE.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL));
+}
+
+// Build the child env for a given backend, in mock or live mode. Always clears
+// BOTH backends' keys first, then sets only the chosen one — otherwise cli.ts's
+// precedence (OPENAI_BASE_URL wins) would silently pick the wrong backend.
+function makeEnv({ backend = "openai", mockPort, home, live = false, model }) {
+  const env = {
     ...process.env,
     HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: join(home, ".config"),
     FORCE_COLOR: "", NO_COLOR: "1",
-    OPENAI_API_KEY: "test",
-    OPENAI_BASE_URL: `http://127.0.0.1:${mockPort}`,
-    MINI_CLAUDE_MODEL: "mock",
   };
+  for (const k of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+                   "http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete env[k];
+  if (live) {
+    if (backend === "anthropic") {
+      env.ANTHROPIC_API_KEY = LIVE.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+      const base = LIVE.ANTHROPIC_BASE_URL || process.env.ANTHROPIC_BASE_URL;
+      if (base) env.ANTHROPIC_BASE_URL = base;
+    } else {
+      env.OPENAI_API_KEY = LIVE.OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+      env.OPENAI_BASE_URL = LIVE.OPENAI_BASE_URL || process.env.OPENAI_BASE_URL;
+    }
+    if (model) env.MINI_CLAUDE_MODEL = model;
+  } else {
+    const url = `http://127.0.0.1:${mockPort}`;
+    if (backend === "anthropic") { env.ANTHROPIC_API_KEY = "test"; env.ANTHROPIC_BASE_URL = url; }
+    else { env.OPENAI_API_KEY = "test"; env.OPENAI_BASE_URL = url; }
+    env.MINI_CLAUDE_MODEL = "mock";
+  }
+  return env;
 }
 
 function initSandbox(gitInit) {
@@ -116,13 +154,15 @@ export async function runRepl(opts = {}) {
     script = {}, args = [], stdin = [], python = false,
     pythonBin = process.env.INTEG_PYTHON || "python3",
     gitInit = false, timeoutMs = 30000, signalAfterMs = 0, allowExhausted = [],
+    backend = "openai", live = false, model,
   } = opts;
 
-  const mock = await startMock(script);
+  const mock = live ? null : await startMock(script);
   const home = mkdtempSync(join(tmpdir(), "mc-home-"));
   const sandbox = initSandbox(gitInit);
   try {
-    const child = spawnCli({ python, pythonBin, args, env: makeEnv(mock.port, home), cwd: sandbox });
+    const env = makeEnv({ backend, mockPort: mock?.port, home, live, model });
+    const child = spawnCli({ python, pythonBin, args, env, cwd: sandbox });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
@@ -137,11 +177,10 @@ export async function runRepl(opts = {}) {
       child.on("exit", (c) => { clearTimeout(t); resolve(c); });
     });
     let servedLog = "";
-    try { servedLog = readFileSync(mock.log, "utf8"); } catch {}
-    assertNoExhaustion(servedLog, allowExhausted);
+    if (mock) { try { servedLog = readFileSync(mock.log, "utf8"); } catch {} assertNoExhaustion(servedLog, allowExhausted); }
     return { stdout, stderr, code, servedLog };
   } finally {
-    mock.stop();
+    if (mock) mock.stop();
     try { rmSync(sandbox, { recursive: true, force: true }); } catch {}
     try { rmSync(home, { recursive: true, force: true }); } catch {}
   }
@@ -158,23 +197,25 @@ export async function runReplInteractive(opts = {}) {
     script = {}, args = [], steps = [], python = false,
     pythonBin = process.env.INTEG_PYTHON || "python3",
     gitInit = false, timeoutMs = 30000, stepTimeoutMs = 8000, allowExhausted = [],
+    backend = "openai", live = false, model,
   } = opts;
 
-  const mock = await startMock(script);
+  const mock = live ? null : await startMock(script);
   const home = mkdtempSync(join(tmpdir(), "mc-home-"));
   const sandbox = initSandbox(gitInit);
   try {
-    const child = spawnCli({ python, pythonBin, args, env: makeEnv(mock.port, home), cwd: sandbox });
+    const child = spawnCli({ python, pythonBin, args, env: makeEnv({ backend, mockPort: mock?.port, home, live, model }), cwd: sandbox });
     let stdout = "", stderr = "";
     let exited = false, exitCode = null;
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("exit", (c) => { exited = true; exitCode = c; });
 
+    // Match against stdout+stderr: prompts print to stdout, errors to stderr.
     const waitFor = (re) => new Promise((resolve, reject) => {
       const start = Date.now();
       const tick = () => {
-        if (re.test(stdout)) return resolve();
+        if (re.test(stdout + stderr)) return resolve();
         if (exited) return reject(new Error(`process exited before matching ${re}\n--stdout--\n${stdout}`));
         if (Date.now() - start > stepTimeoutMs) return reject(new Error(`timeout waiting for ${re}\n--stdout--\n${stdout}`));
         setTimeout(tick, 25);
@@ -190,7 +231,7 @@ export async function runReplInteractive(opts = {}) {
       if (!exited) { child.stdin.write("exit\n"); child.stdin.end(); }
     } catch (e) {
       killGroup(child);
-      let servedLog = ""; try { servedLog = readFileSync(mock.log, "utf8"); } catch {}
+      let servedLog = ""; if (mock) { try { servedLog = readFileSync(mock.log, "utf8"); } catch {} }
       return { stdout, stderr, code: "STEP_ERROR", error: String(e), servedLog };
     }
 
@@ -199,11 +240,11 @@ export async function runReplInteractive(opts = {}) {
       const t = setTimeout(() => { killGroup(child); resolve("TIMEOUT"); }, timeoutMs);
       child.on("exit", (c) => { clearTimeout(t); resolve(c); });
     });
-    let servedLog = ""; try { servedLog = readFileSync(mock.log, "utf8"); } catch {}
-    assertNoExhaustion(servedLog, allowExhausted);
+    let servedLog = "";
+    if (mock) { try { servedLog = readFileSync(mock.log, "utf8"); } catch {} assertNoExhaustion(servedLog, allowExhausted); }
     return { stdout, stderr, code, servedLog };
   } finally {
-    mock.stop();
+    if (mock) mock.stop();
     try { rmSync(sandbox, { recursive: true, force: true }); } catch {}
     try { rmSync(home, { recursive: true, force: true }); } catch {}
   }
