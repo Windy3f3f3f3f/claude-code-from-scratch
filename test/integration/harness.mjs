@@ -57,6 +57,12 @@ export function parseServed(servedLog) {
 export function countCategory(servedLog, category) {
   return parseServed(servedLog).filter((e) => e.category === category).length;
 }
+// All tool-result texts the CLI fed back across the run — lets a test assert the
+// REAL tool output reached the model, not just that a scripted final content
+// happened to mention the value.
+export function toolResultTexts(servedLog) {
+  return parseServed(servedLog).flatMap((e) => e.toolResults || []);
+}
 
 // Throw if the CLI made more requests than a queue was scripted for (unless the
 // test opted in via allowExhausted). This turns an under-scripted / mis-routed
@@ -74,9 +80,13 @@ function assertNoExhaustion(servedLog, allowExhausted = []) {
 function loadDotenv(p) {
   const out = {};
   try {
-    for (const line of readFileSync(p, "utf8").split("\n")) {
-      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
-      if (m) out[m[1]] = m[2];
+    for (const raw of readFileSync(p, "utf8").split("\n")) {
+      const line = raw.replace(/^\s*export\s+/, "");
+      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
+      if (!m) continue;
+      let v = m[2];
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      out[m[1]] = v;
     }
   } catch { /* no .env */ }
   return out;
@@ -85,6 +95,9 @@ const LIVE = loadDotenv(join(REPO, ".env"));
 // Is a real key present for this backend? Gate on .env ONLY (the project's
 // configured live keys) — NOT ambient process.env, which may leak an unrelated /
 // broken key and wrongly un-skip a live test. No .env key → skip cleanly.
+// OpenAI requires BOTH key and base URL: the CLI only enters its OpenAI path when
+// an api base is set (agent.ts derives useOpenAI from apiBase), so a key-only
+// official-OpenAI config wouldn't actually exercise the OpenAI backend here.
 export function liveKeyAvailable(backend) {
   if (backend === "anthropic") return !!LIVE.ANTHROPIC_API_KEY;
   return !!(LIVE.OPENAI_API_KEY && LIVE.OPENAI_BASE_URL);
@@ -108,7 +121,7 @@ function makeEnv({ backend = "openai", mockPort, home, live = false, model }) {
       if (LIVE.ANTHROPIC_BASE_URL) env.ANTHROPIC_BASE_URL = LIVE.ANTHROPIC_BASE_URL;
     } else {
       env.OPENAI_API_KEY = LIVE.OPENAI_API_KEY;
-      env.OPENAI_BASE_URL = LIVE.OPENAI_BASE_URL;
+      if (LIVE.OPENAI_BASE_URL) env.OPENAI_BASE_URL = LIVE.OPENAI_BASE_URL;
     }
     if (model) env.MINI_CLAUDE_MODEL = model;
   } else {
@@ -153,6 +166,16 @@ function killGroup(child) {
   try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
 }
 
+// Read requested files out of the sandbox before it's cleaned up (lets a test
+// assert a tool actually wrote to disk, e.g. README.md === "hello\n").
+function readCaptures(sandbox, captureFiles) {
+  const files = {};
+  for (const f of captureFiles) {
+    try { files[f] = readFileSync(join(sandbox, f), "utf8"); } catch { files[f] = null; }
+  }
+  return files;
+}
+
 /**
  * Bulk mode: pre-load all input lines + "exit", EOF, wait for exit.
  * opts: script, args, stdin[], python, pythonBin, gitInit, timeoutMs, signalAfterMs.
@@ -162,7 +185,7 @@ export async function runRepl(opts = {}) {
     script = {}, args = [], stdin = [], python = false,
     pythonBin = process.env.INTEG_PYTHON || "python3",
     gitInit = false, timeoutMs = 30000, signalAfterMs = 0, allowExhausted = [],
-    backend = "openai", live = false, model, sandboxFiles = {},
+    backend = "openai", live = false, model, sandboxFiles = {}, captureFiles = [], extraEnv = {},
   } = opts;
 
   const mock = live ? null : await startMock(script);
@@ -170,6 +193,7 @@ export async function runRepl(opts = {}) {
   const sandbox = initSandbox(gitInit, sandboxFiles);
   try {
     const env = makeEnv({ backend, mockPort: mock?.port, home, live, model });
+    Object.assign(env, extraEnv);
     const child = spawnCli({ python, pythonBin, args, env, cwd: sandbox });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => { stdout += d; });
@@ -186,7 +210,7 @@ export async function runRepl(opts = {}) {
     });
     let servedLog = "";
     if (mock) { try { servedLog = readFileSync(mock.log, "utf8"); } catch {} assertNoExhaustion(servedLog, allowExhausted); }
-    return { stdout, stderr, code, servedLog };
+    return { stdout, stderr, code, servedLog, files: readCaptures(sandbox, captureFiles) };
   } finally {
     if (mock) mock.stop();
     try { rmSync(sandbox, { recursive: true, force: true }); } catch {}
@@ -205,14 +229,16 @@ export async function runReplInteractive(opts = {}) {
     script = {}, args = [], steps = [], python = false,
     pythonBin = process.env.INTEG_PYTHON || "python3",
     gitInit = false, timeoutMs = 30000, stepTimeoutMs = 8000, allowExhausted = [],
-    backend = "openai", live = false, model, sandboxFiles = {},
+    backend = "openai", live = false, model, sandboxFiles = {}, captureFiles = [], extraEnv = {},
   } = opts;
 
   const mock = live ? null : await startMock(script);
   const home = mkdtempSync(join(tmpdir(), "mc-home-"));
   const sandbox = initSandbox(gitInit, sandboxFiles);
   try {
-    const child = spawnCli({ python, pythonBin, args, env: makeEnv({ backend, mockPort: mock?.port, home, live, model }), cwd: sandbox });
+    const env = makeEnv({ backend, mockPort: mock?.port, home, live, model });
+    Object.assign(env, extraEnv);
+    const child = spawnCli({ python, pythonBin, args, env, cwd: sandbox });
     let stdout = "", stderr = "";
     let exited = false, exitCode = null;
     child.stdout.on("data", (d) => { stdout += d; });
@@ -250,7 +276,7 @@ export async function runReplInteractive(opts = {}) {
     });
     let servedLog = "";
     if (mock) { try { servedLog = readFileSync(mock.log, "utf8"); } catch {} assertNoExhaustion(servedLog, allowExhausted); }
-    return { stdout, stderr, code, servedLog };
+    return { stdout, stderr, code, servedLog, files: readCaptures(sandbox, captureFiles) };
   } finally {
     if (mock) mock.stop();
     try { rmSync(sandbox, { recursive: true, force: true }); } catch {}

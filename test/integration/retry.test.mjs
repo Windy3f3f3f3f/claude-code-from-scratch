@@ -1,35 +1,46 @@
-// Error/retry path: the mock injects a 429 on the first main request, then 200.
-// The CLI's exponential-backoff retry (agent.ts isRetryable: 429/503/529,
-// maxRetries 3) must recover and still complete the turn. Both backends. This
-// path was previously untested. Node CLI.
+// Error/retry path. The mock injects HTTP errors per main request. We set
+// MINI_CLAUDE_SDK_MAX_RETRIES=0 to switch OFF the SDK's built-in retry layer, so
+// these tests actually exercise the CLI's own withRetry (agent.ts: 429/503/529,
+// maxRetries 3) rather than being silently absorbed by the SDK. Both backends.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runRepl, runReplInteractive, parseServed } from "./harness.mjs";
 
+const SDK_OFF = { MINI_CLAUDE_SDK_MAX_RETRIES: "0" };
+
 for (const backend of ["openai", "anthropic"]) {
-  test(`[${backend}] retry: 429 then 200 → turn recovers`, async () => {
+  test(`[${backend}] CLI withRetry recovers 429 → 200 (SDK retries off)`, async () => {
     const { stdout, code, servedLog } = await runRepl({
-      backend,
-      stdin: ["say hi"],
-      script: {
-        status: [429, 200],           // first main request 429, retry gets 200
-        main: [{ content: "RECOVERED_AFTER_429" }],
-      },
-      timeoutMs: 20000,               // first backoff is ~1-2s
+      backend, stdin: ["say hi"],
+      script: { status: [429, 200], main: [{ content: "RECOVERED_AFTER_429" }] },
+      extraEnv: SDK_OFF,
+      timeoutMs: 20000, // one CLI backoff ~1-2s
     });
     assert.equal(code, 0, `exit (stdout: ${stdout})`);
     assert.match(stdout, /RECOVERED_AFTER_429/, "the turn must complete after the retry");
+    assert.match(stdout, /Retry 1\/3/i, "the CLI's own withRetry banner must show (proves it, not the SDK layer)");
     const served = parseServed(servedLog);
-    assert.ok(served.some((e) => e.httpStatus === 429), "a 429 must have been injected");
-    assert.ok(served.some((e) => e.category === "main" && !e.httpStatus), "the retried request must have been served the main turn");
+    assert.equal(served.filter((e) => e.httpStatus === 429).length, 1, "exactly one 429 — the SDK did not retry it");
+    assert.equal(served.filter((e) => e.category === "main" && !e.httpStatus).length, 1, "one successful main serve after the retry");
   });
 
-  test(`[${backend}] hard error (400) surfaces, no false success, REPL survives`, async () => {
-    // A non-retryable 400 on every main request: neither the SDK's internal
-    // retries nor the CLI's withRetry (429/503/529 only) recover. The turn must
-    // NOT print the never-served content, must surface an error, and the REPL
-    // must recover to the prompt and exit cleanly (interactive mode: wait for the
-    // error, then send exit — avoids the bulk-stdin readline race on error turns).
+  test(`[${backend}] CLI withRetry exhausts on all-429 → gives up, no false success (SDK off)`, async () => {
+    const { stdout, stderr, code } = await runReplInteractive({
+      backend,
+      script: { statusAlways: 429, main: [{ content: "SHOULD_NEVER_APPEAR" }] },
+      steps: [{ send: "say hi" }, { wait: /Error:/i }], // the final give-up (not the "Retry N/3" banners)
+      extraEnv: SDK_OFF,
+      allowExhausted: ["main"],
+      stepTimeoutMs: 25000, // the give-up comes only after ~1+2+4s of backoff
+      timeoutMs: 40000,
+    });
+    assert.doesNotMatch(stdout, /SHOULD_NEVER_APPEAR/, "must not print content that was never served");
+    assert.match(stdout, /Retry 3\/3/i, "the retry loop must run to the max before giving up");
+    assert.match(stdout + stderr, /Error:/i, "the final failure must surface");
+    assert.equal(code, 0, "the REPL must recover to the prompt and exit cleanly");
+  });
+
+  test(`[${backend}] non-retryable 400 surfaces immediately, REPL survives`, async () => {
     const { stdout, stderr, code } = await runReplInteractive({
       backend,
       script: { statusAlways: 400, main: [{ content: "SHOULD_NEVER_APPEAR" }] },
@@ -38,7 +49,8 @@ for (const backend of ["openai", "anthropic"]) {
       timeoutMs: 30000,
     });
     assert.doesNotMatch(stdout, /SHOULD_NEVER_APPEAR/, "must not print content that was never served");
-    assert.match(stdout + stderr, /error|400|fail|invalid|request/i, "the failure must surface, not silently pass");
-    assert.equal(code, 0, "the REPL must recover to the prompt and exit cleanly after an API error");
+    assert.doesNotMatch(stdout, /Retry \d\/3/i, "a 400 is not retryable — no retry banner");
+    assert.match(stdout + stderr, /error|400|invalid|request/i, "the failure must surface");
+    assert.equal(code, 0, "the REPL must recover and exit cleanly after an API error");
   });
 }

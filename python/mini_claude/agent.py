@@ -293,9 +293,18 @@ class Agent:
         else:
             self._system_prompt = self._base_system_prompt
 
+        # Optional: cap the SDK's own retry layer (default 2). Set
+        # MINI_CLAUDE_SDK_MAX_RETRIES=0 to isolate our _with_retry in tests.
+        _sdk_retries: dict[str, Any] = {}
+        _rv = os.environ.get("MINI_CLAUDE_SDK_MAX_RETRIES")
+        if _rv is not None and _rv != "":
+            try:
+                _sdk_retries["max_retries"] = int(_rv)
+            except ValueError:
+                pass
         # Initialize clients
         if self.use_openai:
-            self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
+            self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key, **_sdk_retries)
             self._anthropic_client = None
             self._openai_messages.append({"role": "system", "content": self._system_prompt})
         else:
@@ -304,6 +313,7 @@ class Agent:
                 kwargs["api_key"] = api_key
             if anthropic_base_url:
                 kwargs["base_url"] = anthropic_base_url
+            kwargs.update(_sdk_retries)
             self._anthropic_client = anthropic.AsyncAnthropic(**kwargs)
             self._openai_client = None
 

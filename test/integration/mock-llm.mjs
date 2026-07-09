@@ -35,8 +35,23 @@ let mainRequests = 0; // counts every main request (incl. retried) for the statu
 function logServed(backend, category, req, served, exhausted = false, extra = {}) {
   if (!logPath) return;
   try {
-    appendFileSync(logPath, JSON.stringify({ backend, category, served, exhausted, lastUser: lastUserText(req), ...extra }) + "\n");
+    appendFileSync(logPath, JSON.stringify({ backend, category, served, exhausted, lastUser: lastUserText(req), toolResults: extractToolResults(req), ...extra }) + "\n");
   } catch { /* ignore */ }
+}
+
+// The tool results the CLI fed back from the PREVIOUS turn, so a test can assert
+// the real tool output reached the model (not just that a scripted final content
+// mentioned the value). OpenAI: role:"tool" messages. Anthropic: user messages
+// with tool_result content blocks.
+function extractToolResults(body) {
+  const out = [];
+  for (const m of body.messages || []) {
+    if (m.role === "tool") out.push(contentToText(m.content));
+    else if (m.role === "user" && Array.isArray(m.content)) {
+      for (const b of m.content) if (b && b.type === "tool_result") out.push(contentToText(b.content));
+    }
+  }
+  return out;
 }
 
 // Flatten a message content that may be a string or an array of blocks

@@ -25,15 +25,20 @@ for (const backend of ["anthropic", "openai"]) {
     assert.match(stdout, /LIVEPROBE7/, "the real model should echo the requested token");
   });
 
-  test(`[live:${backend}] real tool use: reads a file and reports its content`, { skip }, async () => {
+  test(`[live:${backend}] real tool use: reads a file, echoes a token in the FINAL reply`, { skip }, async () => {
+    // Unique token + composed marker: the tool output alone is "LIVE_FILE_7Q2";
+    // only if the model actually read it AND composed its final reply will the
+    // combined "LIVE_TOOL_OK_LIVE_FILE_7Q2" appear — so this proves the real
+    // tool loop, not just the CLI echoing the tool result.
     const { stdout } = await runReplInteractive({
-      backend, live: true, model: MODEL[backend], gitInit: true, // sandbox README.md = "hi\n"
+      backend, live: true, model: MODEL[backend],
+      sandboxFiles: { "secret.txt": "LIVE_FILE_7Q2\n" },
       steps: [
-        { send: "Read the file README.md in the current directory and tell me the single word it contains." },
-        { wait: /\bhi\b|error/i },
+        { send: "Read the file secret.txt in the current directory, then reply with exactly LIVE_TOOL_OK_ immediately followed by the token you found (e.g. LIVE_TOOL_OK_ABC123)." },
+        { wait: /LIVE_TOOL_OK_LIVE_FILE_7Q2|error/i },
       ],
       timeoutMs: 60000,
     });
-    assert.match(stdout, /\bhi\b/, "the model should call read_file and report the file's content");
+    assert.match(stdout, /LIVE_TOOL_OK_LIVE_FILE_7Q2/, "the model must read the file and echo the token in its own final reply");
   });
 }

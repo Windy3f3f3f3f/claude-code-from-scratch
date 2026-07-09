@@ -298,16 +298,26 @@ export class Agent {
       this.systemPrompt = this.baseSystemPrompt;
     }
 
+    // Optional: cap the SDK's own retry layer (default 2). Set
+    // MINI_CLAUDE_SDK_MAX_RETRIES=0 to isolate our withRetry() in tests (or to
+    // opt out of double-retrying in production).
+    const sdkRetries =
+      process.env.MINI_CLAUDE_SDK_MAX_RETRIES != null && process.env.MINI_CLAUDE_SDK_MAX_RETRIES !== "" &&
+      !Number.isNaN(Number(process.env.MINI_CLAUDE_SDK_MAX_RETRIES))
+        ? { maxRetries: Number(process.env.MINI_CLAUDE_SDK_MAX_RETRIES) }
+        : {};
     if (this.useOpenAI) {
       this.openaiClient = new OpenAI({
         baseURL: options.apiBase,
         apiKey: options.apiKey,
+        ...sdkRetries,
       });
       this.openaiMessages.push({ role: "system", content: this.systemPrompt });
     } else {
       this.anthropicClient = new Anthropic({
         apiKey: options.apiKey,
         ...(options.anthropicBaseURL ? { baseURL: options.anthropicBaseURL } : {}),
+        ...sdkRetries,
       });
     }
   }
