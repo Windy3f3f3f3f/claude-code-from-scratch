@@ -91,3 +91,31 @@ test("py: Auto Mode fast-path (read_file) allowed without classifier", opts, asy
   });
   assert.doesNotMatch(stdout, /Denied/);
 });
+
+// The tests above drive the Python CLI on the OpenAI backend; these two prove the
+// Python CLI's Anthropic-native path (anthropic_base_url → messages.stream) is
+// wired too — Python × both backends, mirroring the TS backend-parity suite.
+test("py[anthropic]: basic chat streams to stdout", opts, async () => {
+  const { stdout, code } = await runRepl({
+    python: true, pythonBin: PY, backend: "anthropic",
+    script: { main: [{ content: "PY_ANT_OK" }] }, stdin: ["say hi"],
+  });
+  assert.equal(code, 0, `exit (stdout: ${stdout})`);
+  assert.match(stdout, /PY_ANT_OK/);
+});
+
+test("py[anthropic]: tool round read_file executes and feeds back", opts, async () => {
+  const { stdout, code } = await runRepl({
+    python: true, pythonBin: PY, backend: "anthropic", gitInit: true,
+    stdin: ["read README.md"],
+    script: {
+      main: [
+        { tool_calls: [{ name: "read_file", arguments: { file_path: "README.md" } }] },
+        { content: "PY_ANT_TOOL saw the file" },
+      ],
+    },
+  });
+  assert.equal(code, 0);
+  assert.match(stdout, /hi/);
+  assert.match(stdout, /PY_ANT_TOOL/);
+});

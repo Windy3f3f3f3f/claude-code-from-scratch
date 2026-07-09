@@ -14,6 +14,17 @@ graph LR
     style Test fill:#e8e0ff
 ```
 
+## Automated Integration Tests (Complementing the Manual Scenarios)
+
+The long list of **manual** acceptance scenarios below isn't the whole story. The repo also ships an **automated integration suite** that catches regressions as you edit: it starts a local mock model and drives the REAL REPL as a subprocess, feeding commands in and asserting the output — covering /goal, /loop, Auto Mode, streaming, permissions, multi-turn tool chains, and MCP, across BOTH the OpenAI and Anthropic backends and BOTH the TypeScript and Python implementations. No network, no key:
+
+```bash
+npm run check:full      # TS/Python unit + dual-backend integration (mock)
+npm run test:live       # real-model smoke; runs only when .env has a key, else skips
+```
+
+`test:live` catches wire drift between the mock and the real API. The manual scenarios still matter: they cover the real model's judgment and the interaction feel that the automated asserts don't reach. The two complement each other rather than replace.
+
 ## Why Manual Testing Is Needed
 
 Testing a coding agent is different from testing regular software -- core behavior depends on LLM responses, and output is non-deterministic. Automated unit tests can cover tool functions (file I/O, permission checks), but end-to-end Agent behavior can only be observed manually:

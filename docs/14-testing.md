@@ -14,6 +14,17 @@ graph LR
     style Test fill:#e8e0ff
 ```
 
+## 自动化集成测试(和手动场景互补)
+
+本章后面那一长串是**手动**验收场景。除此之外,仓库里还有一套**自动化集成测试**,平时改代码就靠它兜底:起一个本地 mock 模型,再用子进程跑真的 REPL,把命令喂进去、断言输出——覆盖 /goal、/loop、Auto Mode、流式、权限、多轮工具链、MCP,而且 OpenAI 和 Anthropic 两个后端、TypeScript 和 Python 两个实现都各跑一遍。全程不联网、不用 key:
+
+```bash
+npm run check:full      # TS/Python 单元 + 双后端集成(mock)
+npm run test:live       # 连真模型的冒烟,.env 配了 key 才跑,没配就跳过
+```
+
+`test:live` 用来抓 mock 和真实 API 的 wire 漂移。手动场景仍有价值:它们覆盖自动化没断言到的真实模型判断和交互手感。两者互补,不是替代。
+
 ## 为什么需要手动测试
 
 Coding Agent 的测试和普通软件不同——核心行为取决于 LLM 的响应，输出不确定。自动化单元测试能覆盖工具函数（文件读写、权限检查），但端到端的 Agent 行为只能人工观察：

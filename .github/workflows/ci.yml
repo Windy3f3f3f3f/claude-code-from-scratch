@@ -1,0 +1,31 @@
+name: CI
+
+# Runs the full check on every push / PR: TS unit + integration (both the
+# OpenAI and Anthropic backends, via the mock — no network, no keys) + Python
+# unit + Python integration parity. The live real-model tests skip cleanly here
+# (no .env keys in CI), so this is deterministic and free.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npm run build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # A venv with anthropic/openai so the Python integration parity tests run
+      # (check:full's test:integration:py prefers .venv/bin/python).
+      - run: python -m venv .venv && ./.venv/bin/pip install --quiet -e ./python
+
+      - run: npm run check:full
