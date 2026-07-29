@@ -60,6 +60,7 @@ from .ui import (
     print_confirmation,
     print_divider,
     print_cost,
+    get_model_pricing,
     print_retry,
     print_info,
     print_sub_agent_start,
@@ -109,6 +110,8 @@ MODEL_CONTEXT = {
     "claude-opus-4-20250514": 200000,
     "gpt-4o": 128000,
     "gpt-4o-mini": 128000,
+    "MiniMax-M3": 1000000,
+    "MiniMax-M2.7": 204800,
 }
 
 
@@ -125,12 +128,16 @@ def _model_supports_thinking(model: str) -> bool:
         return False
     if "claude" in m and any(x in m for x in ("opus", "sonnet", "haiku")):
         return True
+    # MiniMax-M3 (adaptive/off) and MiniMax-M2.7 (always-on) both expose thinking.
+    if "minimax" in m:
+        return True
     return False
 
 
 def _model_supports_adaptive_thinking(model: str) -> bool:
     m = model.lower()
-    return "opus-4-6" in m or "sonnet-4-6" in m
+    # MiniMax-M2.7 keeps thinking always-on, so only MiniMax-M3 is adaptive.
+    return "opus-4-6" in m or "sonnet-4-6" in m or "minimax-m3" in m
 
 
 def _get_max_output_tokens(model: str) -> int:
@@ -514,14 +521,16 @@ class Agent:
         print_info(f"Tokens: {self.total_input_tokens} in / {self.total_output_tokens} out{cache_info}\n  Estimated cost: ${total:.4f}{budget_info}{turn_info}")
 
     def _get_current_cost_usd(self) -> float:
-        # Base input $3/Mtok. Cache read is 0.1x, cache write is 1.25x — the
-        # fixed multipliers Claude Code uses across every model tier.
+        # Per-million-token rates are resolved per model (see get_model_pricing).
+        # The default matches the fixed Claude multipliers (input $3, output $15,
+        # cache read 0.1x, cache write 1.25x); models with published rates override it.
         M = 1_000_000
+        p = get_model_pricing(self.model)
         return (
-            (self.total_input_tokens / M) * 3
-            + (self.total_cache_read_tokens / M) * 0.3
-            + (self.total_cache_creation_tokens / M) * 3.75
-            + (self.total_output_tokens / M) * 15
+            (self.total_input_tokens / M) * p["input"]
+            + (self.total_cache_read_tokens / M) * p["cache_read"]
+            + (self.total_cache_creation_tokens / M) * p["cache_write"]
+            + (self.total_output_tokens / M) * p["output"]
         )
 
     def _check_budget(self) -> dict:
@@ -1542,7 +1551,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
             if not tool_uses:
                 if not self.is_sub_agent:
-                    print_cost(self.total_input_tokens, self.total_output_tokens, self.total_cache_read_tokens, self.total_cache_creation_tokens)
+                    print_cost(self.total_input_tokens, self.total_output_tokens, self.total_cache_read_tokens, self.total_cache_creation_tokens, self.model)
                 break
 
             self.current_turns += 1
@@ -1763,7 +1772,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             tool_calls = message.get("tool_calls")
             if not tool_calls:
                 if not self.is_sub_agent:
-                    print_cost(self.total_input_tokens, self.total_output_tokens, self.total_cache_read_tokens, self.total_cache_creation_tokens)
+                    print_cost(self.total_input_tokens, self.total_output_tokens, self.total_cache_read_tokens, self.total_cache_creation_tokens, self.model)
                 break
 
             self.current_turns += 1

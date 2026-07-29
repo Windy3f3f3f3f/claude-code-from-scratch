@@ -10,6 +10,7 @@ import {
   printConfirmation,
   printDivider,
   printCost,
+  getModelPricing,
   printRetry,
   printInfo,
   printSubAgentStart,
@@ -79,6 +80,8 @@ const MODEL_CONTEXT: Record<string, number> = {
   "claude-opus-4-20250514": 200000,
   "gpt-4o": 128000,
   "gpt-4o-mini": 128000,
+  "MiniMax-M3": 1000000,
+  "MiniMax-M2.7": 204800,
 };
 
 function getContextWindow(model: string): number {
@@ -93,12 +96,15 @@ function modelSupportsThinking(model: string): boolean {
   // Claude 4+ models support thinking (not Claude 3.x)
   if (m.includes("claude-3-") || m.includes("3-5-") || m.includes("3-7-")) return false;
   if (m.includes("claude") && (m.includes("opus") || m.includes("sonnet") || m.includes("haiku"))) return true;
-  return false; // non-Claude models (GPT, etc.) — no thinking
+  // MiniMax-M3 (adaptive/off) and MiniMax-M2.7 (always-on) both expose thinking.
+  if (m.includes("minimax")) return true;
+  return false; // other non-Claude models (GPT, etc.) — no thinking
 }
 
 function modelSupportsAdaptiveThinking(model: string): boolean {
   const m = model.toLowerCase();
-  return m.includes("opus-4-6") || m.includes("sonnet-4-6");
+  // MiniMax-M2.7 keeps thinking always-on, so only MiniMax-M3 is adaptive.
+  return m.includes("opus-4-6") || m.includes("sonnet-4-6") || m.includes("minimax-m3");
 }
 
 // Max output tokens by model (following the same caps Claude Code uses publicly)
@@ -553,12 +559,14 @@ export class Agent {
 
   private getCurrentCostUsd(): number {
     const M = 1_000_000;
-    // Base input $3/Mtok. Cache read is 0.1x, cache write is 1.25x — the fixed
-    // multipliers Claude Code uses across every model tier (utils/modelCost.ts).
-    const costIn = (this.totalInputTokens / M) * 3;
-    const costCacheRead = (this.totalCacheReadTokens / M) * 0.3;
-    const costCacheWrite = (this.totalCacheCreationTokens / M) * 3.75;
-    const costOut = (this.totalOutputTokens / M) * 15;
+    // Per-million-token rates are resolved per model (see getModelPricing).
+    // The default matches the fixed Claude multipliers (input $3, output $15,
+    // cache read 0.1x, cache write 1.25x); models with published rates override it.
+    const p = getModelPricing(this.model);
+    const costIn = (this.totalInputTokens / M) * p.input;
+    const costCacheRead = (this.totalCacheReadTokens / M) * p.cacheRead;
+    const costCacheWrite = (this.totalCacheCreationTokens / M) * p.cacheWrite;
+    const costOut = (this.totalOutputTokens / M) * p.output;
     return costIn + costCacheRead + costCacheWrite + costOut;
   }
 
@@ -1710,7 +1718,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
       if (toolUses.length === 0) {
         if (!this.isSubAgent) {
-          printCost(this.totalInputTokens, this.totalOutputTokens, this.totalCacheReadTokens, this.totalCacheCreationTokens);
+          printCost(this.totalInputTokens, this.totalOutputTokens, this.totalCacheReadTokens, this.totalCacheCreationTokens, this.model);
         }
         break;
       }
@@ -1949,7 +1957,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
       const toolCalls = message.tool_calls;
       if (!toolCalls || toolCalls.length === 0) {
         if (!this.isSubAgent) {
-          printCost(this.totalInputTokens, this.totalOutputTokens, this.totalCacheReadTokens, this.totalCacheCreationTokens);
+          printCost(this.totalInputTokens, this.totalOutputTokens, this.totalCacheReadTokens, this.totalCacheCreationTokens, this.model);
         }
         break;
       }

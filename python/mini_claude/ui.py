@@ -81,13 +81,33 @@ def print_divider() -> None:
     console.print(f"\n[dim]  {'─' * 50}[/dim]")
 
 
-def print_cost(input_tokens: int, output_tokens: int, cache_read: int = 0, cache_creation: int = 0) -> None:
-    # Cache read is billed 0.1x, cache write 1.25x (see agent _get_current_cost_usd).
+# ─── Per-model pricing (USD per million tokens) ─────────────
+# The default rates are the fixed multipliers used across Claude tiers
+# (input $3, output $15, cache read 0.1x = $0.3, cache write 1.25x = $3.75).
+# Models with published per-model rates override the default below so budget
+# enforcement and the per-turn cost line bill at the correct rate.
+DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75}
+
+MODEL_PRICING = {
+    # MiniMax-M3 publishes no separate cache-write rate, so cache writes are
+    # billed at the input rate.
+    "MiniMax-M3": {"input": 0.6, "output": 2.4, "cache_read": 0.12, "cache_write": 0.6},
+    "MiniMax-M2.7": {"input": 0.3, "output": 1.2, "cache_read": 0.06, "cache_write": 0.375},
+}
+
+
+def get_model_pricing(model: str) -> dict:
+    return MODEL_PRICING.get(model, DEFAULT_PRICING)
+
+
+def print_cost(input_tokens: int, output_tokens: int, cache_read: int = 0, cache_creation: int = 0, model: str | None = None) -> None:
+    # Cache read/write and per-token rates are model-specific (see get_model_pricing).
+    p = get_model_pricing(model) if model else DEFAULT_PRICING
     total = (
-        (input_tokens / 1_000_000) * 3
-        + (cache_read / 1_000_000) * 0.3
-        + (cache_creation / 1_000_000) * 3.75
-        + (output_tokens / 1_000_000) * 15
+        (input_tokens / 1_000_000) * p["input"]
+        + (cache_read / 1_000_000) * p["cache_read"]
+        + (cache_creation / 1_000_000) * p["cache_write"]
+        + (output_tokens / 1_000_000) * p["output"]
     )
     cache_str = f", {cache_read} cached" if cache_read else ""
     console.print(f"\n[dim]  Tokens: {input_tokens} in / {output_tokens} out{cache_str} (~${total:.4f})[/dim]")

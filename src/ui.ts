@@ -83,13 +83,44 @@ export function printDivider() {
   console.log(chalk.gray("\n  " + "─".repeat(50)));
 }
 
-export function printCost(inputTokens: number, outputTokens: number, cacheRead = 0, cacheCreation = 0) {
-  // Cache read is billed 0.1x, cache write 1.25x (see agent getCurrentCostUsd).
+// ─── Per-model pricing (USD per million tokens) ─────────────
+// The default rates are the fixed multipliers used across Claude tiers
+// (input $3, output $15, cache read 0.1x = $0.3, cache write 1.25x = $3.75).
+// Models with published per-model rates override the default below so budget
+// enforcement and the per-turn cost line bill at the correct rate.
+export interface ModelPricing {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+export const DEFAULT_PRICING: ModelPricing = {
+  input: 3,
+  output: 15,
+  cacheRead: 0.3,
+  cacheWrite: 3.75,
+};
+
+export const MODEL_PRICING: Record<string, ModelPricing> = {
+  // MiniMax-M3 publishes no separate cache-write rate, so cache writes are
+  // billed at the input rate.
+  "MiniMax-M3": { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0.6 },
+  "MiniMax-M2.7": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
+};
+
+export function getModelPricing(model: string): ModelPricing {
+  return MODEL_PRICING[model] || DEFAULT_PRICING;
+}
+
+export function printCost(inputTokens: number, outputTokens: number, cacheRead = 0, cacheCreation = 0, model?: string) {
+  // Cache read/write and per-token rates are model-specific (see getModelPricing).
+  const p = model ? getModelPricing(model) : DEFAULT_PRICING;
   const total =
-    (inputTokens / 1_000_000) * 3 +
-    (cacheRead / 1_000_000) * 0.3 +
-    (cacheCreation / 1_000_000) * 3.75 +
-    (outputTokens / 1_000_000) * 15;
+    (inputTokens / 1_000_000) * p.input +
+    (cacheRead / 1_000_000) * p.cacheRead +
+    (cacheCreation / 1_000_000) * p.cacheWrite +
+    (outputTokens / 1_000_000) * p.output;
   const cacheStr = cacheRead ? `, ${cacheRead} cached` : "";
   console.log(
     chalk.gray(
