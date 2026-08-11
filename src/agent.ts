@@ -10,6 +10,7 @@ import {
   printConfirmation,
   printDivider,
   printCost,
+  getCacheWriteRate,
   getModelPricing,
   printRetry,
   printInfo,
@@ -97,14 +98,18 @@ function modelSupportsThinking(model: string): boolean {
   if (m.includes("claude-3-") || m.includes("3-5-") || m.includes("3-7-")) return false;
   if (m.includes("claude") && (m.includes("opus") || m.includes("sonnet") || m.includes("haiku"))) return true;
   // MiniMax-M3 (adaptive/off) and MiniMax-M2.7 (always-on) both expose thinking.
-  if (m.includes("minimax")) return true;
+  if (m === "minimax-m3" || m === "minimax-m2.7") return true;
   return false; // other non-Claude models (GPT, etc.) — no thinking
 }
 
 function modelSupportsAdaptiveThinking(model: string): boolean {
   const m = model.toLowerCase();
   // MiniMax-M2.7 keeps thinking always-on, so only MiniMax-M3 is adaptive.
-  return m.includes("opus-4-6") || m.includes("sonnet-4-6") || m.includes("minimax-m3");
+  return m.includes("opus-4-6") || m.includes("sonnet-4-6") || m === "minimax-m3";
+}
+
+function modelUsesAlwaysOnThinking(model: string): boolean {
+  return model.toLowerCase() === "minimax-m2.7";
 }
 
 // Max output tokens by model (following the same caps Claude Code uses publicly)
@@ -371,6 +376,7 @@ export class Agent {
   }
 
   private resolveThinkingMode(): "adaptive" | "enabled" | "disabled" {
+    if (modelUsesAlwaysOnThinking(this.model)) return "enabled";
     if (!this.thinking) return "disabled";
     if (!modelSupportsThinking(this.model)) return "disabled";
     if (modelSupportsAdaptiveThinking(this.model)) return "adaptive";
@@ -565,7 +571,7 @@ export class Agent {
     const p = getModelPricing(this.model);
     const costIn = (this.totalInputTokens / M) * p.input;
     const costCacheRead = (this.totalCacheReadTokens / M) * p.cacheRead;
-    const costCacheWrite = (this.totalCacheCreationTokens / M) * p.cacheWrite;
+    const costCacheWrite = (this.totalCacheCreationTokens / M) * getCacheWriteRate(p);
     const costOut = (this.totalOutputTokens / M) * p.output;
     return costIn + costCacheRead + costCacheWrite + costOut;
   }

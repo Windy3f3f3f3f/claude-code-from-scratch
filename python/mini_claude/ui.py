@@ -89,9 +89,7 @@ def print_divider() -> None:
 DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75}
 
 MODEL_PRICING = {
-    # MiniMax-M3 publishes no separate cache-write rate, so cache writes are
-    # billed at the input rate.
-    "MiniMax-M3": {"input": 0.6, "output": 2.4, "cache_read": 0.12, "cache_write": 0.6},
+    "MiniMax-M3": {"input": 0.6, "output": 2.4, "cache_read": 0.12, "cache_write": None},
     "MiniMax-M2.7": {"input": 0.3, "output": 1.2, "cache_read": 0.06, "cache_write": 0.375},
 }
 
@@ -100,13 +98,19 @@ def get_model_pricing(model: str) -> dict:
     return MODEL_PRICING.get(model, DEFAULT_PRICING)
 
 
+def get_cache_write_rate(pricing: dict) -> float:
+    # Keep unpublished rates as None in metadata and use the input rate only
+    # as the runtime estimate for cache-creation tokens.
+    return pricing["cache_write"] if pricing["cache_write"] is not None else pricing["input"]
+
+
 def print_cost(input_tokens: int, output_tokens: int, cache_read: int = 0, cache_creation: int = 0, model: str | None = None) -> None:
     # Cache read/write and per-token rates are model-specific (see get_model_pricing).
     p = get_model_pricing(model) if model else DEFAULT_PRICING
     total = (
         (input_tokens / 1_000_000) * p["input"]
         + (cache_read / 1_000_000) * p["cache_read"]
-        + (cache_creation / 1_000_000) * p["cache_write"]
+        + (cache_creation / 1_000_000) * get_cache_write_rate(p)
         + (output_tokens / 1_000_000) * p["output"]
     )
     cache_str = f", {cache_read} cached" if cache_read else ""

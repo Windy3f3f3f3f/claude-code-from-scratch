@@ -92,7 +92,7 @@ export interface ModelPricing {
   input: number;
   output: number;
   cacheRead: number;
-  cacheWrite: number;
+  cacheWrite: number | null;
 }
 
 export const DEFAULT_PRICING: ModelPricing = {
@@ -103,14 +103,18 @@ export const DEFAULT_PRICING: ModelPricing = {
 };
 
 export const MODEL_PRICING: Record<string, ModelPricing> = {
-  // MiniMax-M3 publishes no separate cache-write rate, so cache writes are
-  // billed at the input rate.
-  "MiniMax-M3": { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0.6 },
+  "MiniMax-M3": { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: null },
   "MiniMax-M2.7": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
 };
 
 export function getModelPricing(model: string): ModelPricing {
   return MODEL_PRICING[model] || DEFAULT_PRICING;
+}
+
+export function getCacheWriteRate(pricing: ModelPricing): number {
+  // Keep unpublished rates as null in metadata and use the input rate only
+  // as the runtime estimate for cache-creation tokens.
+  return pricing.cacheWrite ?? pricing.input;
 }
 
 export function printCost(inputTokens: number, outputTokens: number, cacheRead = 0, cacheCreation = 0, model?: string) {
@@ -119,7 +123,7 @@ export function printCost(inputTokens: number, outputTokens: number, cacheRead =
   const total =
     (inputTokens / 1_000_000) * p.input +
     (cacheRead / 1_000_000) * p.cacheRead +
-    (cacheCreation / 1_000_000) * p.cacheWrite +
+    (cacheCreation / 1_000_000) * getCacheWriteRate(p) +
     (outputTokens / 1_000_000) * p.output;
   const cacheStr = cacheRead ? `, ${cacheRead} cached` : "";
   console.log(

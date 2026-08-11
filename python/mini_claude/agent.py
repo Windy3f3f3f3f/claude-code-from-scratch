@@ -60,6 +60,7 @@ from .ui import (
     print_confirmation,
     print_divider,
     print_cost,
+    get_cache_write_rate,
     get_model_pricing,
     print_retry,
     print_info,
@@ -129,7 +130,7 @@ def _model_supports_thinking(model: str) -> bool:
     if "claude" in m and any(x in m for x in ("opus", "sonnet", "haiku")):
         return True
     # MiniMax-M3 (adaptive/off) and MiniMax-M2.7 (always-on) both expose thinking.
-    if "minimax" in m:
+    if m in ("minimax-m3", "minimax-m2.7"):
         return True
     return False
 
@@ -137,7 +138,11 @@ def _model_supports_thinking(model: str) -> bool:
 def _model_supports_adaptive_thinking(model: str) -> bool:
     m = model.lower()
     # MiniMax-M2.7 keeps thinking always-on, so only MiniMax-M3 is adaptive.
-    return "opus-4-6" in m or "sonnet-4-6" in m or "minimax-m3" in m
+    return "opus-4-6" in m or "sonnet-4-6" in m or m == "minimax-m3"
+
+
+def _model_uses_always_on_thinking(model: str) -> bool:
+    return model.lower() == "minimax-m2.7"
 
 
 def _get_max_output_tokens(model: str) -> int:
@@ -363,6 +368,8 @@ class Agent:
         return out
 
     def _resolve_thinking_mode(self) -> str:
+        if _model_uses_always_on_thinking(self.model):
+            return "enabled"
         if not self.thinking:
             return "disabled"
         if not _model_supports_thinking(self.model):
@@ -529,7 +536,7 @@ class Agent:
         return (
             (self.total_input_tokens / M) * p["input"]
             + (self.total_cache_read_tokens / M) * p["cache_read"]
-            + (self.total_cache_creation_tokens / M) * p["cache_write"]
+            + (self.total_cache_creation_tokens / M) * get_cache_write_rate(p)
             + (self.total_output_tokens / M) * p["output"]
         )
 
