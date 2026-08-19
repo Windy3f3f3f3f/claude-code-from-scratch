@@ -307,9 +307,9 @@ QQ 群号：**1090526244**
 
 <div align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Windy3f3f3f3f/claude-code-from-scratch&type=Date&theme=dark" />
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Windy3f3f3f3f/claude-code-from-scratch&type=Date" />
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Windy3f3f3f3f/claude-code-from-scratch&type=Date" width="600" />
+  <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Windy3f3f3f3f/claude-code-from-scratch&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Windy3f3f3f3f/claude-code-from-scratch&type=Date" />
+  <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Windy3f3f3f3f/claude-code-from-scratch&type=Date" width="600" />
 </picture>
 </div>
 
