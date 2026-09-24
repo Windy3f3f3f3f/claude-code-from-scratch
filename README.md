@@ -280,6 +280,7 @@ steps/              # 每章可运行的最小实现（单一真源 → 生成�
 ## 🔗 相关项目
 
 - **[how-claude-code-works](https://github.com/Windy3f3f3f3f/how-claude-code-works)** — Claude Code 源码架构深度解析（12 篇专题，33 万字）
+- **[OrcaPromptVault](https://github.com/Continuum-AI-Corp/OrcaPromptVault)** — Claude Code 真实发出的系统提示词与工具定义存档（交互式 26,131 字符 35 个工具，`claude -p` 20,806 字符 29 个工具），每份附可复跑的抓取命令，适合和自己手写的实现逐段对照
 
 ## 🤝 贡献者
 
