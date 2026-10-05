@@ -67,7 +67,7 @@ PARALLEL_MCP_LIVE=1 node --test examples/parallel-search/test.mjs
 This optional check forwards requests through a local recording proxy. It uses a
 scripted model, so it validates tool routing and results rather than answer quality
 from a live model. It requires `curl` and network access and is subject to free-tier limits.
-Neither check reads a project `.env` or the user's saved MCP settings.
+Neither check uses credentials from a project `.env` or the user's saved MCP settings.
 
 ## 中文说明
 
