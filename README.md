@@ -209,6 +209,8 @@ mini-claude-py               # 直接启动
 - **技能系统**：`.claude/skills/` 目录加载，支持 inline 注入和 fork 子 Agent 两种执行模式
 - **多 Agent**：Sub-Agent fork-return 模式（3 内置类型 + `.claude/agents/` 自定义类型）
 - **MCP 集成**：JSON-RPC over stdio 连接外部工具服务器，动态工具发现与调用转发
+
+可选的网页搜索配置及验证方法：[Parallel Search MCP 示例](examples/parallel-search/README.md)。
 - **System Prompt**：@include 语法递归引入、.claude/rules/ 自动加载、模板变量替换
 - **Extended Thinking**：支持 Anthropic 扩展思考（`--thinking`），adaptive/enabled/disabled 三模式
 - **预算控制**：`--max-cost` 费用限制 + `--max-turns` 轮次限制，超限自动停止
