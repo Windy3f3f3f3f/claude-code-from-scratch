@@ -123,8 +123,10 @@ class McpConnection:
             )
         return json.dumps(result)
 
-    def close(self) -> None:
-        """Kill the server process."""
+    async def close(self) -> None:
+        """Stop the server and finish releasing its task and stdio pipes."""
+        reader = self._reader_task
+        process = self._process
         if self._reader_task:
             self._reader_task.cancel()
             self._reader_task = None
@@ -139,6 +141,10 @@ class McpConnection:
             if not fut.done():
                 fut.set_exception(RuntimeError(f"MCP server '{self.server_name}' closed"))
         self._pending.clear()
+        if reader:
+            await asyncio.gather(reader, return_exceptions=True)
+        if process:
+            await process.communicate()
 
 
 # ─── MCP Manager ─────────────────────────────────────────────
@@ -181,7 +187,7 @@ class McpManager:
                 print(f"[mcp] Connected to '{name}' — {len(server_tools)} tools", flush=True)
             except Exception as e:
                 print(f"[mcp] Failed to connect to '{name}': {e}", flush=True)
-                conn.close()
+                await conn.close()
 
     def get_tool_definitions(self) -> list[dict]:
         """Return tool definitions in Anthropic API format with mcp__ prefix."""
@@ -213,7 +219,7 @@ class McpManager:
     async def disconnect_all(self) -> None:
         """Disconnect all servers."""
         for conn in self._connections.values():
-            conn.close()
+            await conn.close()
         self._connections.clear()
         self._tools.clear()
         self._connected = False
