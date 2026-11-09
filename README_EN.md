@@ -185,6 +185,8 @@ mini-claude-py               # Launch directly
 - **Skills System**: Load reusable prompt templates, supports inline injection and fork sub-agent execution
 - **Multi-Agent**: Sub-Agent fork-return pattern (3 built-in + `.claude/agents/` custom types)
 - **MCP Integration**: JSON-RPC over stdio to connect external tool servers, dynamic tool discovery
+
+Optional web search setup and validation: [Parallel Search MCP example](examples/parallel-search/README.md).
 - **System Prompt**: @include syntax for recursive imports, .claude/rules/ auto-loading, template variables
 - **Extended Thinking**: Anthropic extended thinking support (`--thinking`), adaptive/enabled/disabled modes
 - **Budget Control**: `--max-cost` USD limit + `--max-turns` turn limit, auto-stop on exceed

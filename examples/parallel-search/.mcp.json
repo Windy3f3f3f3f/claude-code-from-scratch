@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "parallel-search": {
+      "command": "mcp-remote",
+      "args": [
+        "https://search.parallel.ai/mcp",
+        "--transport",
+        "http-only",
+        "--header",
+        "User-Agent: claude-code-from-scratch/1.0.0"
+      ]
+    }
+  }
+}
